@@ -1,0 +1,172 @@
+# Configuration for create-ticket-channel skill.
+# Edit this file to change naming conventions or selectors without touching SKILL.md or scripts.
+
+# Discovered from 19 real existing Slack channels (search: "sr- case- fr- gq-",
+# and the exact match for SR-4028 itself: #sr-4028-5tattva-low). The real
+# convention is all-lowercase, hyphen-separated, and has NO separate
+# ticket-type segment — the type is already the prefix of ticket_id (e.g.
+# "SR-4028" -> "sr-4028"), so repeating it as its own field would duplicate it.
+# ticket_type is still extracted and logged (see audit log) even though it's
+# not in the channel name.
+channel_format: "{ticket_id}-{customer}-{priority}"
+
+# Exact Jira ticket-type values this team uses. Preserved verbatim in the channel name.
+ticket_types:
+  - CASE
+  - SR
+  - FR
+  - GQ
+
+# Jira "priority.name" -> token used in the channel name.
+# Confirmed by the team: this Jira instance uses a P1-P4 scheme (not
+# Highest/High/Medium/Low/Lowest), mapped to the word-form tokens actually
+# used in real channel names as follows. Note P3 and P4 both map to "low" —
+# confirmed intentional, not a typo. Any priority.name not listed here falls
+# back to a lowercased/sanitized passthrough (see normalize_priority in
+# generate_channel_name.py) rather than blocking the run.
+priority_map:
+  P1: high
+  P2: med
+  P3: low
+  P4: low
+
+# Jira instance details (from existing shift-handover skill; cloud_id
+# confirmed live via getJiraIssue on SR-4028, same cloudId used there).
+jira:
+  mcp: atlassian
+  cloud_id: f4395efa-8472-4279-ac19-6198712949d5
+  site: bloo-systems.atlassian.net
+  # Verified against live ticket SR-4028 — do NOT use fields.issuetype.name
+  # for ticket_type (it was "[System] Service request with approvals", not
+  # "SR"). The correct source is fields.project.key.
+  ticket_type_field: project.key
+  # Verified against live ticket SR-4028: customer/organization lives in
+  # customfield_10002 (a JSM "Organization(s)" field), value shape
+  # [{"name": "5Tattva", ...}] — use fields[0].name. This custom field ID is
+  # generally stable per Jira site for JSM Organizations, but re-verify if a
+  # ticket from a different project returns null here.
+  customer_field: customfield_10002
+
+slack:
+  mcp: slack
+
+browser:
+  # Switched from public-browser to chrome-bridge: public-browser's CDP
+  # connection (--remote-debugging-port / --remote-debugging-pipe) is blocked
+  # machine-wide by this host's EDR/security policy, confirmed via elimination
+  # across three independent attempts (see SKILL.md "Known Limitation" —
+  # renamed "Step 4: How It Was Unblocked" below). chrome-bridge uses a
+  # Chrome extension over a plain local WebSocket (standard Manifest V3 APIs,
+  # no CDP), which does not trigger that block — confirmed connected live.
+  mcp: chrome-bridge
+  # The actual integration is a third-party Atlassian Marketplace app,
+  # "Slack for Jira" by wisoft.eu — NOT a native Atlassian/Slack feature.
+  # Verified live against SR-4028.
+  jira_page_trigger:
+    # In the main Jira page (frame_id omitted / main frame). The real text is
+    # "Open Slack discussions" (plural, lowercase d) — NOT "Open Slack
+    # Discussion" as originally assumed before live verification.
+    find_text: "Open Slack discussions"
+    selector_hint: '[data-testid="issue-view-base.context.ecosystem.connect.content-container"]'
+  # The panel lives in an iframe whose URL matches this pattern — find it via
+  # chrome-bridge's get_frames and match on hostname, since the full URL
+  # includes a per-session JWT and issue-specific query params that change
+  # every load.
+  iframe_url_pattern: "atlassian.wisoft.eu/slack/"
+  # Selectors inside that iframe (pass frame_id from get_frames to query_dom
+  # /click/etc). Verified live against SR-4028 via query_dom.
+  create_channel_button:
+    # NOTE: renders as <a> text "Create another channel..." when a channel
+    # already exists (verified on SR-4028), or as <button> text "Create new
+    # channel" when none exists yet (verified on SR-4058) — same data-bind,
+    # different tag. Match on the attribute only, not the tag, to cover both.
+    selector: '[data-bind="click: createChannelBtn"]'
+    # If a channel already exists, Step 3's Slack MCP dedup check must have
+    # already stopped the skill before reaching here — do not rely on this
+    # panel for dedup, and do not click this if existing_channel_display
+    # (below) is present (this app allows multiple channels per issue, so
+    # clicking it wouldn't be caught as a duplicate).
+  existing_channel_display:
+    selector: '.channel-link-item.slack-room-list-item-inline'
+    # When present, its text content is the dedicated channel name (e.g.
+    # "🔒sr-4028-5tattva-low" — strip the leading lock emoji). This is a
+    # second, browser-native confirmation signal for Step 5, in addition to
+    # the Slack MCP search — Jira/the integration echoes back the channel
+    # name it created.
+  # Verified live end-to-end against SR-4058 (real creation). Clicking
+  # create_channel_button opens a NEW iframe (not a modal in the same
+  # frame) — get_frames again and match on "context=createRoomDialog" in
+  # the URL.
+  create_room_dialog:
+    iframe_url_pattern: "context=createRoomDialog"
+    # Pre-filled with just the lowercased ticket ID (e.g. "sr-4058") by
+    # default — must be cleared and replaced with the full generated name.
+    name_input_selector: ".channel-name-field"
+    # Auto-fills as "{ticket_id} - {summary} - {jira_url}", matching the
+    # real convention on existing channels. Leave as-is.
+    purpose_input_selector: "#tab-channel form div:nth-of-type(5) input"
+    # Defaults to checked, matching every real channel observed. Leave as-is
+    # unless told otherwise.
+    private_checkbox_selector: "#checkbox-private-channel"
+    submit_selector: "#content-container > footer button:nth-of-type(1)"
+    # IMPORTANT: use `selector`, not a cached `ref`, for both the name input
+    # and submit click in this dialog. A cached ref from an earlier
+    # get_interactives call was seen to silently target a stale/detached
+    # node here (typed text never appeared, click reported success but had
+    # no effect) because this app re-renders the dialog's DOM after it
+    # opens. Always confirm the name input's actual value via execute_js
+    # (`document.querySelector(name_input_selector).value`, requires "Allow
+    # user scripts" enabled on the chrome-bridge extension) before
+    # submitting — a "typed: true"/"clicked: true" result is not proof the
+    # value changed.
+
+retry:
+  max_attempts_per_ui_action: 3
+
+# Pre-flight checks: verify all dependencies are ready before starting.
+# Set enabled: false to skip checks (not recommended for production).
+preflight:
+  enabled: true
+  # Check chrome-bridge is connected (required for Step 4 browser automation)
+  check_chrome_bridge: true
+  # Check Jira API is reachable (required for Step 1 metadata fetch)
+  check_jira_connectivity: true
+  # Check Slack API is reachable (required for Steps 3, 5, 7)
+  check_slack_connectivity: true
+  # Fail fast on first check failure (don't continue if any check fails)
+  fail_fast: true
+
+# Timeout configuration: prevents indefinite hangs if APIs are slow.
+# All values in seconds. Timeouts are per-MCP-call, not cumulative.
+timeouts:
+  # Step 0: Pre-flight checks (each check has its own timeout)
+  preflight_check: 10
+
+  # Step 1: Fetch Jira metadata
+  jira_fetch: 10
+
+  # Step 2: Generate channel name (local script, should be instant)
+  # (no timeout needed, script runs locally)
+
+  # Step 3: Check if channel already exists in Slack
+  slack_search: 5
+
+  # Step 4: Browser automation (chrome-bridge operations)
+  browser_navigation: 30
+  browser_interaction: 15  # click, type, wait_for operations
+  browser_wait_network_idle: 20
+
+  # Step 5: Verify channel was created in Slack
+  slack_verification: 10
+
+  # Step 6: Write audit log (local file operation, should be instant)
+  # (no timeout needed, file write is local)
+
+  # Step 7: Post starter message to Slack
+  slack_post_message: 10
+
+  # Overall pipeline timeout: if ANY single operation exceeds this, stop.
+  # This is a safety valve to prevent the entire skill from hanging.
+  overall_timeout: 120  # 2 minutes max per run
+
+audit_log_path: "~/.claude/skills/create-ticket-channel/audit.log.jsonl"
