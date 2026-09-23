@@ -170,3 +170,62 @@ timeouts:
   overall_timeout: 120  # 2 minutes max per run
 
 audit_log_path: "~/.claude/skills/create-ticket-channel/audit.log.jsonl"
+
+# Tier 2: Ticket-to-Channel Sync
+# Keeps Slack channels synchronized with Jira ticket status and properties.
+tier_2:
+  sync:
+    # Enable/disable Tier 2 sync feature
+    enabled: true
+
+    # Sync trigger method: "webhook" for real-time, "polling" for fallback
+    trigger: "webhook"
+
+    # Polling interval (if webhook unavailable), in seconds
+    polling_interval_seconds: 300  # 5 minutes
+
+    # What to sync from Jira to Slack
+    sync_status: true       # Update channel topic with status
+    sync_priority: true     # Highlight priority changes
+    sync_assignee: true     # Show who it's assigned to
+
+    # Archive behavior: close channels automatically when ticket is resolved
+    archive_on_status:
+      - "Done"
+      - "Resolved"
+      - "Closed"
+
+    # Status-specific actions
+    status_actions:
+      "Open":
+        emoji: "🟠"
+        description: "Waiting for attention"
+      "In Progress":
+        emoji: "🔵"
+        description: "Work in progress"
+      "In Review":
+        emoji: "🟡"
+        description: "Pending review"
+      "Done":
+        emoji: "🟢"
+        description: "Completed and closed"
+        action: "archive"
+      "Resolved":
+        emoji: "🟢"
+        description: "Issue resolved"
+        action: "archive"
+
+    # Priority colors (for future use in rich formatting)
+    priority_colors:
+      "P1": "#FF0000"  # Red - Critical
+      "P2": "#FF9900"  # Orange - High
+      "P3": "#FFFF00"  # Yellow - Medium
+      "P4": "#00FF00"  # Green - Low
+
+    # Retry behavior
+    max_retries: 3
+    retry_delay_seconds: 60
+
+    # Rate limiting
+    max_syncs_per_minute: 10
+    max_channel_updates_per_day: 100

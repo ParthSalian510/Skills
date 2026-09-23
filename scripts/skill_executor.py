@@ -29,6 +29,7 @@ from timeout_wrapper import TimeoutWrapper, TimeoutError as TimeoutException
 from error_messages import error_message
 from audit_logger import AuditLogger, audit_preflight_checks, audit_jira_fetch, audit_slack_search
 from retry_logic import with_retry, classify_error, ErrorType
+from ticket_sync import TicketSyncManager
 
 
 class SkillExecutor:
@@ -71,6 +72,11 @@ class SkillExecutor:
             "Unknown",  # Will be updated after Jira fetch
             config_path.parent / self.config.get("audit_log_path", "audit.log.jsonl")
         )
+
+        # Initialize Tier 2 sync manager (optional)
+        self.sync_manager = None
+        if self.config.get("tier_2", {}).get("sync", {}).get("enabled", False):
+            self.sync_manager = TicketSyncManager(self.config.get("tier_2", {}).get("sync", {}))
 
     def _extract_ticket_type(self) -> str:
         """Extract ticket type from ticket ID (e.g., 'SR' from 'SR-4028')."""
@@ -115,10 +121,14 @@ class SkillExecutor:
             if not verified:
                 raise Exception("Channel creation could not be verified via Slack")
 
-            # Step 6: Write audit log
-            self._step_6_write_audit_log()
+            # Step 6: Tier 2 - Sync ticket status to channel (optional)
+            if self.sync_manager and not self.dry_run:
+                self._step_6_tier2_sync(metadata)
 
-            # Step 7: Post starter message (optional)
+            # Step 7: Write audit log
+            self._step_7_write_audit_log()
+
+            # Step 8: Post starter message (optional)
             # (Skipped in this basic implementation)
 
             # Success!
@@ -333,20 +343,74 @@ class SkillExecutor:
             )
             raise
 
-    def _step_6_write_audit_log(self):
-        """Step 6: Write audit log entry."""
-        print("Step 6: Write audit log")
+    def _step_6_tier2_sync(self, metadata: Dict[str, Any]):
+        """Step 6: Tier 2 - Sync ticket status to Slack channel."""
+        if not self.sync_manager:
+            return
+
+        print("Step 6: Tier 2 - Sync ticket status")
+        start = time.time()
+
+        try:
+            # Build ticket state for sync
+            state = {
+                "ticket_id": self.ticket_id,
+                "status": metadata.get("status", "Unknown"),
+                "priority": metadata.get("priority", "Unknown"),
+                "assignee": metadata.get("assignee", "Unassigned"),
+                "summary": metadata.get("summary", ""),
+                "updated_at": metadata.get("updated_at", ""),
+            }
+
+            # Build Jira URL
+            jira_url = f"https://{self.config.get('jira', {}).get('site', 'bloo-systems.atlassian.net')}/browse/{self.ticket_id}"
+
+            # Run sync
+            result = self.sync_manager.sync_ticket(
+                self.ticket_id,
+                self.channel_name,
+                state,
+                jira_url
+            )
+
+            duration = time.time() - start
+            self.audit_logger.record_step(
+                6, "Tier 2 - Sync ticket status", "success", duration,
+                details={"details": {"sync_result": result}}
+            )
+
+            if result["status"] == "success":
+                print(f"  ✓ Ticket sync completed ({duration:.2f}s)")
+                if result["changes_detected"]:
+                    print(f"    - Updated topic with {list(result['changes'].keys())}")
+                else:
+                    print(f"    - No changes to sync")
+            else:
+                print(f"  ⚠ Sync result: {result['status']} ({duration:.2f}s)")
+
+        except Exception as e:
+            duration = time.time() - start
+            self.audit_logger.record_step(
+                6, "Tier 2 - Sync ticket status", "failure", duration,
+                error={"type": "sync_failed", "message": str(e)}
+            )
+            print(f"  ⚠ Sync failed: {str(e)}")
+            # Don't raise - sync is optional and shouldn't block channel creation
+
+    def _step_7_write_audit_log(self):
+        """Step 7: Write audit log entry."""
+        print("Step 7: Write audit log")
         start = time.time()
 
         try:
             duration = time.time() - start
-            self.audit_logger.record_step(6, "Write audit log", "success", duration)
+            self.audit_logger.record_step(7, "Write audit log", "success", duration)
             print(f"  ✓ Audit log written ({duration:.2f}s)")
 
         except Exception as e:
             duration = time.time() - start
             self.audit_logger.record_step(
-                6, "Write audit log", "failure", duration,
+                7, "Write audit log", "failure", duration,
                 error={"type": "audit_write_failed", "message": str(e)}
             )
             raise
