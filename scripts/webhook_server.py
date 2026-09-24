@@ -23,6 +23,7 @@ import json
 import hmac
 import hashlib
 import logging
+import os
 from typing import Dict, Any, Optional, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -309,6 +310,14 @@ def create_webhook_app(config: WebhookConfig, sync_callback: Optional[Callable] 
         }), 200
 
     return app
+
+
+# Create app for production deployment (Gunicorn)
+config = WebhookConfig(
+    secret=os.environ.get("JIRA_WEBHOOK_SECRET", "test-secret"),
+    debug=os.environ.get("DEBUG", "false").lower() == "true",
+)
+app = create_webhook_app(config)
 
 
 def main():
