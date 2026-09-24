@@ -22,6 +22,7 @@ Or run directly:
 import json
 import hmac
 import hashlib
+import html
 import logging
 import os
 import re
@@ -172,21 +173,52 @@ def _option_value(field: Any) -> Optional[str]:
     return field or None
 
 
+GREETING_RE = re.compile(
+    r"^(dear|hi|hello|hey|greetings|good\s+(morning|afternoon|evening))\b[^,.!:\n]{0,40}[,.!:]?\s*",
+    re.IGNORECASE,
+)
+SIGN_OFF_RE = re.compile(
+    r"^(thanks|thank\s+you|regards|best|kind|warm|warmest|sincerely|cheers|br)\b[\w\s&,.!-]{0,30}$",
+    re.IGNORECASE,
+)
+
+
 def _adf_text(node: Any) -> str:
-    if isinstance(node, dict):
-        if node.get("type") == "text":
-            return node.get("text", "")
-        return " ".join(_adf_text(child) for child in node.get("content", []))
-    return ""
+    if not isinstance(node, dict):
+        return ""
+    node_type = node.get("type")
+    if node_type == "text":
+        return node.get("text", "")
+    if node_type == "hardBreak":
+        return "\n"
+    inner = "".join(_adf_text(child) for child in node.get("content", []))
+    return inner + "\n" if node_type in ("paragraph", "heading", "listItem") else inner
+
+
+def _strip_greeting_and_sign_off(lines: List[str]) -> List[str]:
+    if lines:
+        lines = [GREETING_RE.sub("", lines[0], count=1)] + lines[1:]
+        if not lines[0]:
+            lines = lines[1:]
+    for i, line in enumerate(lines):
+        if SIGN_OFF_RE.match(line):
+            return lines[:i]
+    return lines
 
 
 def clean_description(description: Any) -> str:
-    """Flatten a Jira description (plain/wiki text, HTML or ADF) into one short line."""
+    """Flatten a Jira description (plain/wiki text, HTML or ADF) into one short line, minus greeting and sign-off."""
     if isinstance(description, dict):
         text = _adf_text(description)
     else:
-        text = re.sub(r"<[^>]+>", " ", description or "")
-    text = " ".join(text.split())
+        text = re.sub(r"<br\s*/?>|</(p|div|li|h\d)>", "\n", description or "", flags=re.IGNORECASE)
+        text = html.unescape(re.sub(r"<[^>]+>", " ", text))
+
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    body = _strip_greeting_and_sign_off(lines) or lines
+
+    text = " ".join(body)
     if len(text) > DESCRIPTION_MAX_CHARS:
         text = text[:DESCRIPTION_MAX_CHARS].rsplit(" ", 1)[0] + "…"
     return text or "No description provided"
