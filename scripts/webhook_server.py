@@ -37,6 +37,12 @@ try:
 except ImportError:
     HAS_FLASK = False
 
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +59,132 @@ class WebhookConfig:
     port: int = 5000
     host: str = "0.0.0.0"
     max_queue_size: int = 100
+    slack_token: Optional[str] = None
+    slack_channel_prefix: str = "ticket"
+
+
+class SlackMessenger:
+    """Sends messages to Slack channels."""
+
+    def __init__(self, token: str):
+        if not HAS_REQUESTS:
+            raise ImportError("requests is required. Install with: pip install requests")
+        self.token = token
+        self.base_url = "https://slack.com/api"
+
+    def create_channel(self, channel_name: str) -> Dict[str, Any]:
+        """Create a Slack channel."""
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "name": channel_name.lower().replace(" ", "-")[:80],
+            "is_private": False,
+        }
+        try:
+            response = requests.post(
+                f"{self.base_url}/conversations.create",
+                headers=headers,
+                json=data,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("ok"):
+                return {"success": True, "channel_id": result["channel"]["id"]}
+            else:
+                error = result.get("error", "Unknown error")
+                if error == "name_taken":
+                    return {"success": True, "channel_id": None, "exists": True}
+                logger.error(f"Failed to create channel: {error}")
+                return {"success": False, "error": error}
+        except Exception as e:
+            logger.error(f"Error creating channel: {e}")
+            return {"success": False, "error": str(e)}
+
+    def send_message(self, channel_id: str, text: str, blocks: Optional[list] = None) -> bool:
+        """Send a message to a Slack channel."""
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "channel": channel_id,
+            "text": text,
+        }
+        if blocks:
+            data["blocks"] = blocks
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/chat.postMessage",
+                headers=headers,
+                json=data,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("ok"):
+                logger.info(f"Message sent to channel {channel_id}")
+                return True
+            else:
+                logger.error(f"Failed to send message: {result.get('error')}")
+                return False
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+            return False
+
+
+def format_starter_message(ticket_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Format a starter message for a new ticket channel."""
+    ticket_id = ticket_data.get("ticket_id", "UNKNOWN")
+    summary = ticket_data.get("summary", "")
+    priority = ticket_data.get("priority", "P3")
+    assignee = ticket_data.get("assignee", "Unassigned")
+    status = ticket_data.get("status", "Unknown")
+
+    text = f"🚀 *{ticket_id}: {summary}*\n_Priority: {priority} | Status: {status} | Assigned to: {assignee}_"
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"{ticket_id}: {summary}",
+            },
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Priority:*\n{priority}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Status:*\n{status}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Assignee:*\n{assignee}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Created:*\n{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+                },
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Channel created for ticket tracking and real-time updates",
+                },
+            ],
+        },
+    ]
+
+    return {"text": text, "blocks": blocks}
 
 
 class WebhookValidator:
@@ -258,6 +390,64 @@ class WebhookHandler:
         }
 
 
+def create_sync_callback(config: WebhookConfig) -> Optional[Callable]:
+    """
+    Create a sync callback function that sends messages to Slack.
+
+    Args:
+        config: WebhookConfig with slack_token
+
+    Returns:
+        Callback function or None if Slack is not configured
+    """
+    if not config.slack_token:
+        logger.warning("Slack token not configured, sync callback disabled")
+        return None
+
+    messenger = SlackMessenger(config.slack_token)
+
+    def sync_callback(task: Dict[str, Any]) -> None:
+        """Process sync task: create channel and send starter message."""
+        try:
+            ticket_id = task.get("ticket_id")
+            ticket_data = task.get("ticket_data", {})
+
+            if not ticket_id:
+                logger.error("No ticket_id in task")
+                return
+
+            channel_name = f"{config.slack_channel_prefix}-{ticket_id.lower()}"
+            logger.info(f"Syncing {ticket_id} to Slack channel {channel_name}")
+
+            channel_result = messenger.create_channel(channel_name)
+            if not channel_result.get("success"):
+                if not channel_result.get("exists"):
+                    logger.error(f"Failed to create channel: {channel_result.get('error')}")
+                    return
+
+            channel_id = channel_result.get("channel_id")
+            if not channel_id:
+                logger.warning(f"Channel {channel_name} already exists, looking up ID")
+                return
+
+            message_data = format_starter_message(ticket_data)
+            success = messenger.send_message(
+                channel_id,
+                message_data["text"],
+                message_data["blocks"],
+            )
+
+            if success:
+                logger.info(f"Starter message sent to {channel_name}")
+            else:
+                logger.error(f"Failed to send starter message to {channel_name}")
+
+        except Exception as e:
+            logger.error(f"Error in sync callback: {e}")
+
+    return sync_callback
+
+
 def create_webhook_app(config: WebhookConfig, sync_callback: Optional[Callable] = None):
     """
     Create Flask app with webhook endpoints.
@@ -316,8 +506,11 @@ def create_webhook_app(config: WebhookConfig, sync_callback: Optional[Callable] 
 config = WebhookConfig(
     secret=os.environ.get("JIRA_WEBHOOK_SECRET", "test-secret"),
     debug=os.environ.get("DEBUG", "false").lower() == "true",
+    slack_token=os.environ.get("SLACK_BOT_TOKEN"),
+    slack_channel_prefix=os.environ.get("SLACK_CHANNEL_PREFIX", "ticket"),
 )
-app = create_webhook_app(config)
+sync_callback = create_sync_callback(config)
+app = create_webhook_app(config, sync_callback)
 
 
 def main():
