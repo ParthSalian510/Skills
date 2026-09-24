@@ -24,7 +24,8 @@ import hmac
 import hashlib
 import logging
 import os
-from typing import Dict, Any, Optional, Callable
+import re
+from typing import Dict, Any, Optional, Callable, List
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
@@ -61,6 +62,7 @@ class WebhookConfig:
     max_queue_size: int = 100
     slack_token: Optional[str] = None
     slack_channel_prefix: str = "ticket"
+    slack_invite_user_ids: tuple = ()
 
 
 class SlackMessenger:
@@ -133,58 +135,84 @@ class SlackMessenger:
             logger.error(f"Error sending message: {e}")
             return False
 
+    def invite_users(self, channel_id: str, user_ids: List[str]) -> bool:
+        """Invite users to a channel."""
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        data = {"channel": channel_id, "users": ",".join(user_ids)}
+        try:
+            response = requests.post(
+                f"{self.base_url}/conversations.invite",
+                headers=headers,
+                json=data,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("ok") or result.get("error") == "already_in_channel":
+                logger.info(f"Invited {', '.join(user_ids)} to channel {channel_id}")
+                return True
+            logger.error(f"Failed to invite users: {result.get('error')}")
+            return False
+        except Exception as e:
+            logger.error(f"Error inviting users: {e}")
+            return False
+
+
+ORGANIZATIONS_FIELD = "customfield_10002"
+PRODUCT_VERSION_FIELD = "customfield_10171"
+PRODUCT_FIELD = "customfield_10194"
+DESCRIPTION_MAX_CHARS = 500
+
+
+def _option_value(field: Any) -> Optional[str]:
+    if isinstance(field, dict):
+        return field.get("value") or field.get("name")
+    return field or None
+
+
+def _adf_text(node: Any) -> str:
+    if isinstance(node, dict):
+        if node.get("type") == "text":
+            return node.get("text", "")
+        return " ".join(_adf_text(child) for child in node.get("content", []))
+    return ""
+
+
+def clean_description(description: Any) -> str:
+    """Flatten a Jira description (plain/wiki text, HTML or ADF) into one short line."""
+    if isinstance(description, dict):
+        text = _adf_text(description)
+    else:
+        text = re.sub(r"<[^>]+>", " ", description or "")
+    text = " ".join(text.split())
+    if len(text) > DESCRIPTION_MAX_CHARS:
+        text = text[:DESCRIPTION_MAX_CHARS].rsplit(" ", 1)[0] + "…"
+    return text or "No description provided"
+
+
+def _slack_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 
 def format_starter_message(ticket_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Format a starter message for a new ticket channel."""
+    """Format the starter message posted when a ticket channel is created."""
     ticket_id = ticket_data.get("ticket_id", "UNKNOWN")
-    summary = ticket_data.get("summary", "")
-    priority = ticket_data.get("priority", "P3")
-    assignee = ticket_data.get("assignee", "Unassigned")
-    status = ticket_data.get("status", "Unknown")
+    esc = lambda key, default: _slack_escape(str(ticket_data.get(key) or default))
 
-    text = f"🚀 *{ticket_id}: {summary}*\n_Priority: {priority} | Status: {status} | Assigned to: {assignee}_"
-
-    blocks = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": f"{ticket_id}: {summary}",
-            },
-        },
-        {
-            "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Priority:*\n{priority}",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Status:*\n{status}",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Assignee:*\n{assignee}",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Created:*\n{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
-                },
-            ],
-        },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "Channel created for ticket tracking and real-time updates",
-                },
-            ],
-        },
+    lines = [
+        f"*Organisation:* {esc('organisation', 'Not set')}",
+        f"*Title:* {esc('summary', '')}",
+        f"*Priority check:* {esc('priority', 'Not set')}",
+        f"*Type Check:* {esc('issue_type', 'Unknown')} ({esc('project_key', '')})",
+        f"*Product Version Check:* {esc('product_version', 'Not tracked in Jira for this ticket')}",
+        f"*Description:* {esc('description', '')} Status: {esc('status', 'Unknown')}.",
     ]
+    if ticket_data.get("url"):
+        lines.append(f"\n*Jira:* <{ticket_data['url']}|{ticket_id}>")
 
-    return {"text": text, "blocks": blocks}
+    return {"text": "\n".join(lines), "blocks": None}
 
 
 class WebhookValidator:
@@ -231,19 +259,30 @@ class WebhookValidator:
             if "webhookEvent" not in event or "issue" not in event:
                 return None
 
-            issue = event.get("issue", {})
-            fields = issue.get("fields", {})
+            issue = event.get("issue") or {}
+            fields = issue.get("fields") or {}
+            ticket_id = issue.get("key")
+
+            organisations = [o.get("name") for o in fields.get(ORGANIZATIONS_FIELD) or [] if o.get("name")]
+            base_url = (issue.get("self") or "").split("/rest/")[0] or os.environ.get("JIRA_BASE_URL", "")
 
             return {
-                "ticket_id": issue.get("key"),
-                "status": fields.get("status", {}).get("name", "Unknown"),
-                "priority": fields.get("priority", {}).get("name", "P3"),
-                "assignee": fields.get("assignee", {}).get("displayName", "Unassigned"),
-                "summary": fields.get("summary", ""),
+                "ticket_id": ticket_id,
+                "status": (fields.get("status") or {}).get("name", "Unknown"),
+                "priority": (fields.get("priority") or {}).get("name", "P3"),
+                "assignee": (fields.get("assignee") or {}).get("displayName", "Unassigned"),
+                "summary": (fields.get("summary") or "").strip(),
+                "organisation": ", ".join(organisations) or None,
+                "issue_type": (fields.get("issuetype") or {}).get("name"),
+                "project_key": (fields.get("project") or {}).get("key") or (ticket_id or "").split("-")[0],
+                "product_version": _option_value(fields.get(PRODUCT_VERSION_FIELD))
+                or _option_value(fields.get(PRODUCT_FIELD)),
+                "description": clean_description(fields.get("description")),
+                "url": f"{base_url}/browse/{ticket_id}" if base_url and ticket_id else None,
                 "updated_at": issue.get("updated", datetime.utcnow().isoformat() + "Z"),
                 "event_type": event.get("webhookEvent"),
             }
-        except (KeyError, TypeError):
+        except (KeyError, TypeError, AttributeError):
             return None
 
 
@@ -430,6 +469,9 @@ def create_sync_callback(config: WebhookConfig) -> Optional[Callable]:
                 logger.warning(f"Channel {channel_name} already exists, looking up ID")
                 return
 
+            if config.slack_invite_user_ids:
+                messenger.invite_users(channel_id, list(config.slack_invite_user_ids))
+
             message_data = format_starter_message(ticket_data)
             success = messenger.send_message(
                 channel_id,
@@ -508,6 +550,9 @@ config = WebhookConfig(
     debug=os.environ.get("DEBUG", "false").lower() == "true",
     slack_token=os.environ.get("SLACK_BOT_TOKEN"),
     slack_channel_prefix=os.environ.get("SLACK_CHANNEL_PREFIX", "ticket"),
+    slack_invite_user_ids=tuple(
+        uid.strip() for uid in os.environ.get("SLACK_INVITE_USER_IDS", "").split(",") if uid.strip()
+    ),
 )
 sync_callback = create_sync_callback(config)
 app = create_webhook_app(config, sync_callback)
