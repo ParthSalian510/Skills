@@ -78,6 +78,26 @@ check("6 events (4 changes + 2 public comments)", len(tl) == 6, len(tl))
 check("Author and text escaped for Slack", "Komal &lt;K&gt;" in se.format_event(tl[-2]) and "&amp;" in se.format_event(tl[-2]), se.format_event(tl[-2]))
 check("Change line format", se.format_event(tl[0]) == "*21 Sep 16:32* · Automation for Jira — Priority: P1 → P3", se.format_event(tl[0]))
 
+# N3: Automation's first-seconds changes belong to the opening state (real CASE-4009 pattern).
+created = se.parse_jira_time("2026-09-21T16:32:19.229+0530")
+auto = [dict(e) for e in changelog]
+auto[0] = {**auto[0], "author": {"displayName": "Automation for Jira", "accountType": "app"}}
+check("Automation change within 60 s kept in opening state",
+      se.opening_snapshot(current, auto, created)["priority"] == "P3", se.opening_snapshot(current, auto, created))
+check("Human changes still undone", se.opening_snapshot(current, auto, created)["status"] == "Open")
+tl_auto = se.build_timeline(auto, comments, created)
+check("Opening Automation change not listed in history", len(tl_auto) == 5 and
+      not any(e["kind"] == "change" and e["who"] == "Automation for Jira" for e in tl_auto), len(tl_auto))
+late = [dict(e) for e in auto]
+late[0] = {**late[0], "created": "2026-09-21T16:40:00.000+0530"}
+check("Automation change after the window is history, not opening",
+      se.opening_snapshot(current, late, created)["priority"] == "P1" and len(se.build_timeline(late, comments, created)) == 6)
+human_fast = [dict(e) for e in changelog]
+human_fast[0] = {**human_fast[0], "author": {"displayName": "Parth Salian", "accountType": "atlassian"}}
+check("A person's change within the window is still history",
+      se.opening_snapshot(current, human_fast, created)["priority"] == "P1")
+check("Without a creation time nothing is skipped", se.opening_snapshot(current, auto)["priority"] == "P1")
+
 
 class FakeSlack:
     def __init__(self):

@@ -903,6 +903,15 @@ each ticket returned:
   archive the channel when status is in `archive_on_status`.
 - **Anything else** (older untracked tickets, archived channels): ignored.
 
+**Backfill** (`jira_poller.py backfill KEY [--dry-run]`) creates the channel
+for a ticket that's already in progress or closed, then replays its history.
+The starter message shows the ticket as the team first saw it: changes made
+by an app account such as "Automation for Jira" within 60 seconds of
+creation (`OPENING_SETTLE_SECONDS` in `sync_engine.py`) count as part of the
+opening state and are left out of the history. On CASE-4009, Automation
+changed P1 → P3 three seconds in, so the ticket opened at P3. Later
+Automation changes, and anything a person does, stay in the history.
+
 Every Slack and Jira call has a timeout (15–20 s) and at most 3 attempts
 (`request_with_retry` in `webhook_server.py`). Rate limits (429) are retried
 after Slack's/Jira's `Retry-After` (capped at 30 s). Server errors and dropped

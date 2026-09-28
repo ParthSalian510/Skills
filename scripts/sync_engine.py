@@ -124,10 +124,10 @@ class SyncEngine:
         """Create the channel for an already-progressed ticket and replay its full history into it."""
         ticket = WebhookValidator.extract_event_data({"webhookEvent": "jira:backfill", "issue": issue})
         key = ticket["ticket_id"]
-        opening = {**ticket, **opening_snapshot(snapshot(ticket), changelog)}
-        timeline = build_timeline(changelog, comments)
-        internal = sum(1 for c in comments if c.get("jsdPublic") is False)
         created = parse_jira_time((issue.get("fields") or {}).get("created"))
+        opening = {**ticket, **opening_snapshot(snapshot(ticket), changelog, created)}
+        timeline = build_timeline(changelog, comments, created)
+        internal = sum(1 for c in comments if c.get("jsdPublic") is False)
         header = (f"*Ticket history · {key}* — replayed from Jira\n"
                   f"Opened {created.strftime('%d %b %Y %H:%M') if created else '?'} as *{opening.get('status')}* · "
                   f"now *{ticket.get('status')}* · {sum(e['kind'] == 'change' for e in timeline)} changes · "
@@ -279,10 +279,31 @@ def _value(field: str, raw: Optional[str]) -> Optional[str]:
     return (raw or "Unassigned") if field == "assignee" else raw
 
 
-def opening_snapshot(current: Dict[str, Any], changelog: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Undo every tracked-field change, newest first, to get the values the ticket was opened with."""
+# Jira Automation rules often adjust a ticket in its first seconds (CASE-4009: P1 → P3
+# three seconds after creation). Those changes are part of how the ticket was opened,
+# so the starter message shows the settled values and the history doesn't list them.
+OPENING_SETTLE_SECONDS = 60
+
+
+def is_opening_automation(entry: Dict[str, Any], created: Optional[datetime]) -> bool:
+    """A change made by an app account (e.g. "Automation for Jira") within the settle window after creation."""
+    if not created or (entry.get("author") or {}).get("accountType") != "app":
+        return False
+    at = parse_jira_time(entry.get("created"))
+    return at is not None and 0 <= (at - created).total_seconds() <= OPENING_SETTLE_SECONDS
+
+
+def opening_snapshot(current: Dict[str, Any], changelog: List[Dict[str, Any]],
+                     created: Optional[datetime] = None) -> Dict[str, Any]:
+    """Undo tracked-field changes, newest first, to get the values the ticket was opened with.
+
+    With `created`, Automation's changes in the first OPENING_SETTLE_SECONDS are kept
+    (not undone): the opening state is what the team first saw, not the raw form input.
+    """
     state = dict(current)
     for entry in sorted(changelog, key=lambda e: e["created"], reverse=True):
+        if is_opening_automation(entry, created):
+            continue
         for item in entry.get("items", []):
             field = HISTORY_FIELDS.get(item.get("field"))
             if field:
@@ -290,10 +311,16 @@ def opening_snapshot(current: Dict[str, Any], changelog: List[Dict[str, Any]]) -
     return state
 
 
-def build_timeline(changelog: List[Dict[str, Any]], comments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Chronological list of tracked-field changes and public comments (internal notes are dropped)."""
+def build_timeline(changelog: List[Dict[str, Any]], comments: List[Dict[str, Any]],
+                   created: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Chronological list of tracked-field changes and public comments (internal notes are dropped).
+
+    With `created`, Automation's opening adjustments are left out: they're already in the opening state.
+    """
     events = []
     for entry in changelog:
+        if is_opening_automation(entry, created):
+            continue
         changes = [(HISTORY_FIELDS[i["field"]], _value(HISTORY_FIELDS[i["field"]], i.get("fromString")),
                     _value(HISTORY_FIELDS[i["field"]], i.get("toString")))
                    for i in entry.get("items", []) if i.get("field") in HISTORY_FIELDS]
