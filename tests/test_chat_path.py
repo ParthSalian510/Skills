@@ -56,35 +56,35 @@ for f in ("customfield_10002", "customfield_10171", "customfield_10194", "descri
 # Step 2: name from the same fields.
 name, errors = generate_channel_name(issue["key"], fields["project"]["key"], fields["customfield_10002"][0]["name"],
                                      fields["priority"]["name"], load_config(str(ROOT / "config" / "config.yaml")))
-check("Step 2 name follows the standard", name == "case-4009-isoc-med" and not errors, (name, errors))
+check("Step 2 name follows the standard", name == "case-4009-acme-med" and not errors, (name, errors))
 
 # Step 3: run-log lookup finds live runs only.
 with tempfile.TemporaryDirectory() as tmp:
     os.environ["CTC_LOG_DIR"] = tmp
     check("Lookup with no log → nothing known", run_log.known_channels("CASE-4009") == [])
     records = [
-        {"ticket_id": "CASE-4009", "mode": "live", "channel_name": "case-4009-isoc-med",
+        {"ticket_id": "CASE-4009", "mode": "live", "channel_name": "case-4009-acme-med",
          "summary": {"final_status": "success"}},
-        {"ticket_id": "CASE-4010", "mode": "dry_run", "channel_name": "case-4010-isoc-low",
+        {"ticket_id": "CASE-4010", "mode": "dry_run", "channel_name": "case-4010-acme-low",
          "summary": {"final_status": "dry_run"}},
-        {"ticket_id": "CASE-4011", "mode": "live", "channel_name": "case-4011-isoc-low",
+        {"ticket_id": "CASE-4011", "mode": "live", "channel_name": "case-4011-acme-low",
          "summary": {"final_status": "failure"}},
         {"ticket_id": "SR-4058", "mode": "live", "legacy_format": "flat-v1", "channel_name": "sr-4058-aail-low",
          "jira_channel_action": "created"},
     ]
     (Path(tmp) / "skill-runs.jsonl").write_text("\n".join(json.dumps(r) for r in records) + "\n")
-    check("Live success found (case-insensitive key)", run_log.known_channels("case-4009") == ["case-4009-isoc-med"])
+    check("Live success found (case-insensitive key)", run_log.known_channels("case-4009") == ["case-4009-acme-med"])
     check("Dry runs don't count", run_log.known_channels("CASE-4010") == [])
     check("Failed runs don't count", run_log.known_channels("CASE-4011") == [])
     check("Legacy flat-v1 records count", run_log.known_channels("SR-4058") == ["sr-4058-aail-low"])
     out = subprocess.run([sys.executable, str(ROOT / "scripts" / "run_log.py"), "lookup", "CASE-4009"],
                          capture_output=True, text=True, env={**os.environ, "CTC_LOG_DIR": tmp})
-    check("lookup CLI prints JSON", json.loads(out.stdout)["known_channels"] == ["case-4009-isoc-med"], out.stdout)
+    check("lookup CLI prints JSON", json.loads(out.stdout)["known_channels"] == ["case-4009-acme-med"], out.stdout)
     os.environ.pop("CTC_LOG_DIR", None)
 
 # Step 7: the exact starter message.
-EXPECTED = """*Organisation:* ISOC
-*Title:* ISOC|AD servers went offline
+EXPECTED = """*Organisation:* ACME
+*Title:* ACME|AD servers went offline
 *Priority check:* P2
 *Type Check:* [System] Problem (CASE)
 *Product Version Check:* 9.2.0
@@ -117,7 +117,7 @@ check("SKILL.md Step 3 checks the run log first", "run_log.py lookup" in SKILL.s
 
 # G2: the manager that makes no Slack calls must not claim it did.
 result = TicketSyncManager({"archive_on_status": ["Completed"]}).sync_ticket(
-    "CASE-4009", "case-4009-isoc-med", {"status": "Completed", "priority": "P2"}, "https://x")
+    "CASE-4009", "case-4009-acme-med", {"status": "Completed", "priority": "P2"}, "https://x")
 statuses = {a["status"] for a in result.get("actions_taken", [])}
 check("TicketSyncManager actions are 'planned', never 'completed'", statuses == {"planned"}, statuses)
 

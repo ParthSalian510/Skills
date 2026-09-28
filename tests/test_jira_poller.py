@@ -32,7 +32,7 @@ def jira_time(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000%z")
 
 
-def issue(key, created, status="Pending", priority="P3", assignee="Parth Salian", customer="ISOC"):
+def issue(key, created, status="Pending", priority="P3", assignee="Parth Salian", customer="ACME"):
     return {"key": key, "self": "https://bloo-systems.atlassian.net/rest/api/3/issue/1", "fields": {
         "summary": f"{customer} | test", "status": {"name": status}, "priority": {"name": priority},
         "assignee": {"displayName": assignee}, "issuetype": {"name": "[System] Problem"},
@@ -106,7 +106,7 @@ with tempfile.TemporaryDirectory() as tmp:
     counts = poller.poll_once()
     check("Pre-existing ticket ignored", counts.get("ignored") == 1, counts)
     check("New ticket provisioned", counts.get("created") == 1, counts)
-    check("Standard channel name", ("create", "case-4020-isoc-low") in slack.calls, slack.calls)
+    check("Standard channel name", ("create", "case-4020-acme-low") in slack.calls, slack.calls)
     check("Invite + starter message sent", kinds(slack) == ["create", "invite", "send"], kinds(slack))
     tracked = jp.ChannelState(state_path).tickets.get("CASE-4020", {})
     check("Mapping persisted with baseline fields", tracked.get("channel_id") and tracked.get("status") == "Pending")
@@ -129,13 +129,13 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # Assignee-only change: message but no topic change.
     slack.calls.clear()
-    jira.issues = [issue("CASE-4020", now + timedelta(seconds=5), priority="P1", assignee="Sebastin")]
+    jira.issues = [issue("CASE-4020", now + timedelta(seconds=5), priority="P1", assignee="Sam")]
     poller.poll_once()
     check("Assignee change posts note only", kinds(slack) == ["send"], kinds(slack))
 
     # Resolved: topic, message mentioning archive, archive, then inactive.
     slack.calls.clear()
-    jira.issues = [issue("CASE-4020", now + timedelta(seconds=5), status="Resolved", priority="P1", assignee="Sebastin")]
+    jira.issues = [issue("CASE-4020", now + timedelta(seconds=5), status="Resolved", priority="P1", assignee="Sam")]
     poller.poll_once()
     check("Resolve → topic, note, archive", kinds(slack) == ["topic", "send", "archive"], kinds(slack))
     check("Note says channel is being archived", "archiving" in slack.calls[1][2])
@@ -145,7 +145,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("Archived channel no longer synced", slack.calls == [] and counts.get("inactive") == 1, counts)
 
     # Channel already exists in Slack: remembered, not retried every poll.
-    slack.existing.add("case-4021-isoc-low")
+    slack.existing.add("case-4021-acme-low")
     slack.calls.clear()
     jira.issues = [issue("CASE-4021", now + timedelta(seconds=5))]
     counts = poller.poll_once()
@@ -156,7 +156,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # Manually tracked channel: first poll baselines silently, then syncs changes.
     with poller.state.locked():
-        poller.state.tickets["CASE-3997"] = {"channel_id": "C0C4JS4P77E", "channel_name": "case-3997-isoc-med", "archived": False}
+        poller.state.tickets["CASE-3997"] = {"channel_id": "C0C4JS4P77E", "channel_name": "case-3997-acme-med", "archived": False}
     slack.calls.clear()
     jira.issues = [issue("CASE-3997", now - timedelta(days=20), priority="P2")]
     counts = poller.poll_once()

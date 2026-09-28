@@ -36,7 +36,7 @@ def txt(t):
 
 
 doc = {"type": "doc", "content": [
-    para(txt("Hello "), {"type": "mention", "attrs": {"text": "@Sebastin"}}, {"type": "hardBreak"}, txt("see "),
+    para(txt("Hello "), {"type": "mention", "attrs": {"text": "@Sam"}}, {"type": "hardBreak"}, txt("see "),
          {"type": "inlineCard", "attrs": {"url": "https://zoom.us/j/1"}}),
     {"type": "mediaGroup", "content": [{"type": "media"}, {"type": "media"}]},
     {"type": "bulletList", "content": [{"type": "listItem", "content": [para(txt("Used: 132 GB"))]}]},
@@ -45,7 +45,7 @@ doc = {"type": "doc", "content": [
         {"type": "tableCell", "content": [para(txt("Details"))]}]}]},
 ]}
 text = se.clean_comment(doc)
-check("Mention rendered", "@Sebastin" in text, text)
+check("Mention rendered", "@Sam" in text, text)
 check("Link rendered", "https://zoom.us/j/1" in text)
 check("Attachments separated", "[attachment] [attachment]" in text, text)
 check("List item bulleted", "• Used: 132 GB" in text, text)
@@ -64,8 +64,8 @@ changelog = [
 ]
 comments = [
     {"created": "2026-09-21T16:58:13.529+0530", "author": {"displayName": "Parth Salian"}, "jsdPublic": True, "body": para(txt("Session link"))},
-    {"created": "2026-09-22T09:50:47.874+0530", "author": {"displayName": "Soham Shah"}, "jsdPublic": False, "body": para(txt("internal note"))},
-    {"created": "2026-09-24T10:57:52.095+0530", "author": {"displayName": "Komal <K>"}, "jsdPublic": True, "body": para(txt("Please confirm & share"))},
+    {"created": "2026-09-22T09:50:47.874+0530", "author": {"displayName": "Jordan Lee"}, "jsdPublic": False, "body": para(txt("internal note"))},
+    {"created": "2026-09-24T10:57:52.095+0530", "author": {"displayName": "Casey <K>"}, "jsdPublic": True, "body": para(txt("Please confirm & share"))},
 ]
 current = {"status": "Completed", "priority": "P3", "assignee": "Parth Salian"}
 check("Opening state reconstructed", se.opening_snapshot(current, changelog) ==
@@ -75,7 +75,7 @@ check("Internal notes excluded", all("internal note" not in e.get("text", "") fo
 check("Untracked fields ignored", all(f in se.TRACKED_FIELDS for e in tl if e["kind"] == "change" for f, _, _ in e["changes"]))
 check("Chronological order", [e["at"] for e in tl] == sorted(e["at"] for e in tl))
 check("6 events (4 changes + 2 public comments)", len(tl) == 6, len(tl))
-check("Author and text escaped for Slack", "Komal &lt;K&gt;" in se.format_event(tl[-2]) and "&amp;" in se.format_event(tl[-2]), se.format_event(tl[-2]))
+check("Author and text escaped for Slack", "Casey &lt;K&gt;" in se.format_event(tl[-2]) and "&amp;" in se.format_event(tl[-2]), se.format_event(tl[-2]))
 check("Change line format", se.format_event(tl[0]) == "*21 Sep 16:32* · Automation for Jira — Priority: P1 → P3", se.format_event(tl[0]))
 
 # N3: Automation's first-seconds changes belong to the opening state (real CASE-4009 pattern).
@@ -123,9 +123,9 @@ class FakeSlack:
 
 
 issue = {"key": "CASE-4009", "self": "https://bloo-systems.atlassian.net/rest/api/3/issue/1", "fields": {
-    "summary": "ISOC|AD servers went offline", "status": {"name": "Completed"}, "priority": {"name": "P2"},
+    "summary": "ACME|AD servers went offline", "status": {"name": "Completed"}, "priority": {"name": "P2"},
     "assignee": {"displayName": "Parth Salian"}, "issuetype": {"name": "[System] Problem"}, "project": {"key": "CASE"},
-    "customfield_10002": [{"name": "ISOC"}], "created": "2026-09-21T16:32:19.229+0530"}}
+    "customfield_10002": [{"name": "ACME"}], "created": "2026-09-21T16:32:19.229+0530"}}
 changelog[0]["items"][0]["toString"] = "P3"
 changelog.append({"created": "2026-09-24T12:48:16.555+0530", "author": {"displayName": "Parth Salian"},
                   "items": [{"field": "priority", "fromString": "P3", "toString": "P2"}]})
@@ -140,7 +140,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     r = engine.backfill(issue, changelog, comments, pause=0)
     check("Backfill succeeds", r["outcome"] == "backfilled", r.get("outcome"))
-    check("Channel named from current priority", slack.calls[0] == ("create", "case-4009-isoc-med"), slack.calls[0])
+    check("Channel named from current priority", slack.calls[0] == ("create", "case-4009-acme-med"), slack.calls[0])
     starter = next(c[1] for c in slack.calls if c[0] == "starter")
     check("Starter shows opening priority", "*Priority check:* P1" in starter, starter)
     posts = [c for c in slack.calls if c[0] == "post"]

@@ -17,13 +17,14 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audit_logger import AuditLogger
 from sync_engine import ChannelState, SyncEngine, default_state_path, utcnow
+from case_index import CaseIndex
 from summarizer import from_config as summarizer_from_config
 from webhook_server import SlackMessenger, request_with_retry
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = SKILL_ROOT / "config" / "config.yaml"
 JIRA_FIELDS = ["summary", "status", "priority", "assignee", "issuetype", "project", "description",
-               "created", "updated", "customfield_10002", "customfield_10171", "customfield_10194"]
+               "created", "updated", "resolutiondate", "customfield_10002", "customfield_10171", "customfield_10194"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("jira_poller")
@@ -79,11 +80,13 @@ class JiraClient:
 
 class Poller:
     def __init__(self, jira, messenger, state: ChannelState, projects: List[str], lookback_minutes: int,
-                 archive_statuses: List[str], invite_user_ids=(), summarizer=None, summary_tickets=()):
+                 archive_statuses: List[str], invite_user_ids=(), summarizer=None, summary_tickets=(),
+                 case_index=None, index_channel_name="case-index", index_tickets=("*",)):
         self.jira, self.state = jira, state
         self.engine = SyncEngine(messenger, state, archive_statuses, invite_user_ids, summarizer=summarizer,
                                  fetch_comments=jira.get_comments if summarizer else None,
-                                 summary_tickets=summary_tickets)
+                                 summary_tickets=summary_tickets, case_index=case_index,
+                                 index_channel_name=index_channel_name, index_tickets=index_tickets)
         self.projects, self.lookback_minutes = projects, lookback_minutes
         self.failing = False
 
@@ -160,6 +163,9 @@ def build_poller(state_path: Path) -> "Poller":
         invite_user_ids=invite,
         summarizer=summarizer_from_config(cfg),
         summary_tickets=(cfg.get("summaries") or {}).get("tickets") or [],
+        case_index=CaseIndex() if (cfg.get("case_index") or {}).get("enabled") else None,
+        index_channel_name=(cfg.get("case_index") or {}).get("slack_channel", "case-index"),
+        index_tickets=(cfg.get("case_index") or {}).get("tickets") or ["*"],
     )
 
 
@@ -181,6 +187,11 @@ def main(argv=None) -> int:
     sm = sub.add_parser("summarize", help="post a case summary so far into a tracked ticket's channel")
     sm.add_argument("ticket_id")
     sm.add_argument("--dry-run", action="store_true", help="print the summary; no Slack calls")
+    ix = sub.add_parser("index", help="add closed tickets to the case index (#case-index + index/cases.jsonl)")
+    ix.add_argument("ticket_ids", nargs="+")
+    ix.add_argument("--dry-run", action="store_true", help="print the entries; write and post nothing")
+    ic = sub.add_parser("index-channel", help="use an existing Slack channel as #case-index")
+    ic.add_argument("channel_id")
     args = p.parse_args(argv)
     state_path = Path(args.state)
 
@@ -191,10 +202,16 @@ def main(argv=None) -> int:
                                                      "channel_name": args.channel_name, "archived": False}
         print(f"Tracking {args.ticket_id.upper()} → #{args.channel_name}; fields are baselined on the next poll.")
         return 0
+    if args.cmd == "index-channel":
+        state = ChannelState(state_path)
+        with state.locked():
+            state.meta["index_channel_id"] = args.channel_id
+        print(f"Case index channel set to {args.channel_id}.")
+        return 0
     if args.cmd == "status":
         state = ChannelState(state_path)
         print(json.dumps({"started_at": state.started_at, "last_poll_at": state.last_poll_at,
-                          "tickets": state.tickets}, indent=2))
+                          "meta": state.meta, "tickets": state.tickets}, indent=2))
         return 0
 
     poller = build_poller(state_path)
@@ -213,6 +230,24 @@ def main(argv=None) -> int:
                                                 dry_run=args.dry_run)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["outcome"] in ("dry_run", "posted") else 1
+    if args.cmd == "index":
+        if not (poller.engine.summarizer and poller.engine.case_index is not None):
+            raise SystemExit("Case index is off: enable tier_2.sync.summaries and tier_2.sync.case_index in config")
+        results = []
+        for key in (k.upper() for k in args.ticket_ids):
+            issue = poller.jira.get_issue(key, JIRA_FIELDS)
+            status = ((issue.get("fields") or {}).get("status") or {}).get("name")
+            if status not in poller.engine.archive_statuses and not args.dry_run:
+                results.append({"outcome": "not_closed", "ticket_id": key, "status": status})
+                continue
+            comments = poller.jira.get_comments(key)
+            with poller.state.locked():
+                tracked = poller.state.tickets.get(key)
+                result = poller.engine.close_case(issue, comments, tracked=tracked, source="poller",
+                                                  dry_run=args.dry_run)
+            results.append(result)
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return 0 if all(r["outcome"] in ("indexed", "dry_run") for r in results) else 1
     if args.cmd == "once":
         print(json.dumps(poller.poll_once()))
         return 0

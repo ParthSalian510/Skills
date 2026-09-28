@@ -74,6 +74,19 @@ CASE_PROMPT = """Write the case summary for this ticket in exactly this shape (o
 {ticket}
 </ticket>"""
 
+RESOLUTION_PROMPT = """This ticket is closed. Write its entry for the team's index of past cases, so someone facing a similar problem later can find it and see what fixed it.
+
+Reply with only a JSON object, no code fence, with these keys:
+  "problem": one or two sentences on what went wrong, as the customer experienced it.
+  "root_cause": one or two sentences on why; say "Not established" if the comments never found it.
+  "fix": one to three sentences on what resolved it or the workaround; say "Not recorded" if unclear.
+  "components": up to 6 short names of the services, servers or product areas involved.
+  "keywords": up to 8 lowercase search words or short phrases someone might type (symptoms, errors, components).
+
+<ticket>
+{ticket}
+</ticket>"""
+
 UPDATE_PROMPT = """New public comments were added to this ticket. Write one to three "• " bullets saying what they add: new findings, actions taken, decisions, or what is needed next. If they add nothing of substance (only scheduling, pleasantries, "any update?"), reply with exactly {no_update}.
 
 <ticket>
@@ -141,6 +154,23 @@ class ClaudeCLISummarizer:
         body = self._ask(CASE_PROMPT.format(ticket=render_ticket(ticket, comments, text_of)))
         return self._clean(body, _names(comments))
 
+    def resolution(self, ticket: Dict[str, Any], comments: List[Dict[str, Any]],
+                   text_of: Callable[[Any], str]) -> Optional[Dict[str, Any]]:
+        """Structured problem / root cause / fix for the case index; None if the call or the JSON failed."""
+        raw = self._ask(RESOLUTION_PROMPT.format(ticket=render_ticket(ticket, comments, text_of)))
+        data = _parse_json(raw)
+        if not data:
+            return None
+        names = _names(comments)
+        out = {}
+        for field in ("problem", "root_cause", "fix"):
+            value = data.get(field)
+            out[field] = self._clean(str(value), names) if value else None
+        for field, cap in (("components", 6), ("keywords", 8)):
+            values = data.get(field) if isinstance(data.get(field), list) else []
+            out[field] = [v for v in (self._clean(str(x), names) for x in values[:cap]) if v]
+        return out if out["problem"] else None
+
     def update(self, ticket: Dict[str, Any], new: List[Dict[str, Any]], earlier: List[Dict[str, Any]],
                text_of: Callable[[Any], str]) -> Optional[str]:
         """Bullets for new comments; "" when they add nothing; None when the call failed."""
@@ -149,6 +179,20 @@ class ClaudeCLISummarizer:
         if body is not None and body.strip().strip(".") == NO_UPDATE:
             return ""
         return self._clean(body, _names(new + earlier))
+
+
+def _parse_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The model's JSON reply, tolerating a stray code fence or text around the object."""
+    if not raw:
+        return None
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(raw[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 GENERIC_WORDS = {"support", "team", "admin", "service", "services", "desk", "helpdesk", "customer", "user", "bloo",

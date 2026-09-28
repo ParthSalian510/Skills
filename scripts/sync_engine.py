@@ -44,6 +44,7 @@ class ChannelState:
         self.started_at: str = ""
         self.last_poll_at: Optional[str] = None
         self.tickets: Dict[str, Dict[str, Any]] = {}
+        self.meta: Dict[str, Any] = {}  # e.g. index_channel_id
         with self.locked():
             pass
 
@@ -52,12 +53,13 @@ class ChannelState:
         self.started_at = data.get("started_at") or utcnow().isoformat()
         self.last_poll_at = data.get("last_poll_at")
         self.tickets = data.get("tickets", {})
+        self.meta = data.get("meta", {})
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"started_at": self.started_at, "last_poll_at": self.last_poll_at,
-                                   "tickets": self.tickets}, indent=2))
+                                   "meta": self.meta, "tickets": self.tickets}, indent=2))
         os.replace(tmp, self.path)
 
     @contextmanager
@@ -91,12 +93,20 @@ def format_update_message(ticket: Dict[str, Any], changes: Dict[str, Dict[str, A
 
 class SyncEngine:
     def __init__(self, messenger, state: ChannelState, archive_statuses: List[str], invite_user_ids=(),
-                 summarizer=None, fetch_comments=None, summary_tickets=()):
-        """summarizer + fetch_comments(key) turn on comment summaries for summary_tickets ("*" = all tracked)."""
+                 summarizer=None, fetch_comments=None, summary_tickets=(), case_index=None,
+                 index_channel_name: str = "case-index", index_tickets=("*",)):
+        """summarizer + fetch_comments(key) turn on comment summaries for summary_tickets ("*" = all tracked).
+        With case_index too, closing a ticket in index_tickets posts a resolution summary and indexes the case."""
         self.messenger, self.state = messenger, state
         self.archive_statuses, self.invite_user_ids = archive_statuses, tuple(invite_user_ids)
         self.summarizer, self.fetch_comments = summarizer, fetch_comments
         self.summary_tickets = {k.upper() for k in summary_tickets}
+        self.case_index, self.index_channel_name = case_index, index_channel_name
+        self.index_tickets = {k.upper() for k in index_tickets}
+
+    def indexing_for(self, key: str) -> bool:
+        return bool(self.summarizer and self.fetch_comments and self.case_index is not None and
+                    ("*" in self.index_tickets or key.upper() in self.index_tickets))
 
     def summaries_for(self, key: str) -> bool:
         return bool(self.summarizer and self.fetch_comments and
@@ -125,7 +135,7 @@ class SyncEngine:
                 return "baselined"
             changes = {f: {"old": tracked.get(f), "new": ticket.get(f)} for f in TRACKED_FIELDS
                        if tracked.get(f) != ticket.get(f)}
-            result = self._sync(ticket, tracked, changes, source) if changes else "unchanged"
+            result = self._sync(ticket, tracked, changes, source, issue=issue) if changes else "unchanged"
             if self.summaries_for(key) and not tracked.get("archived"):
                 comment_result = self._sync_comments(ticket, tracked, source)
                 if comment_result and result == "unchanged":
@@ -171,6 +181,73 @@ class SyncEngine:
         run.finalize(tracked.get("channel_name"), "success" if posted and body else "failure")
         logger.info(f"[{source}] summarised {n} on {key}")
         return "summarized" if posted and body else "failed"
+
+    # ------------------------------------------------------------ case index
+
+    def index_channel_id(self) -> Optional[str]:
+        """#case-index, created (and people invited) on first use; its id is kept in state."""
+        cid = self.state.meta.get("index_channel_id")
+        if cid:
+            return cid
+        created = self.messenger.create_channel(self.index_channel_name)
+        cid = created.get("channel_id")
+        if not cid:
+            logger.error(f"Could not create #{self.index_channel_name}: {created.get('error') or 'name taken'}; "
+                         f"set it with: jira_poller.py index-channel <CHANNEL_ID>")
+            return None
+        if self.invite_user_ids:
+            self.messenger.invite_users(cid, list(self.invite_user_ids))
+        self.messenger.set_topic(cid, "Closed cases: problem, root cause and fix. One message per case; "
+                                      "search here or with scripts/case_index.py.")
+        self.state.meta["index_channel_id"] = cid
+        return cid
+
+    def build_index_entry(self, issue: Dict[str, Any], comments: List[Dict[str, Any]],
+                          tracked: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        ticket = WebhookValidator.extract_event_data({"webhookEvent": "jira:index", "issue": issue})
+        public = [c for c in comments if c.get("jsdPublic") is not False]
+        res = self.summarizer.resolution(ticket, public, clean_comment)
+        if not res:
+            return None
+        fields = issue.get("fields") or {}
+        from summarizer import scrub
+        return {"ticket_id": ticket["ticket_id"], "title": scrub(ticket.get("summary") or ""),
+                "customer": ticket.get("customer"), "product_version": ticket.get("product_version"),
+                "priority": ticket.get("priority"), "status": ticket.get("status"),
+                "opened": fields.get("created"), "closed": fields.get("resolutiondate") or fields.get("updated"),
+                **res, "jira_url": ticket.get("url"),
+                "slack_channel_id": (tracked or {}).get("channel_id"),
+                "slack_channel_name": (tracked or {}).get("channel_name"),
+                "public_comments": len(public), "indexed_at": utcnow().isoformat()}
+
+    def close_case(self, issue: Dict[str, Any], comments: List[Dict[str, Any]], tracked: Optional[Dict[str, Any]] = None,
+                   source: str = "poller", dry_run: bool = False) -> Dict[str, Any]:
+        """Resolution summary → index file + #case-index (+ the ticket's own channel if it's still open).
+
+        Caller holds the state lock when tracked is given. Nothing is posted if the summary failed:
+        the ticket can be indexed later with `jira_poller.py index KEY`.
+        """
+        entry = self.build_index_entry(issue, comments, tracked)
+        key = issue.get("key")
+        if not entry:
+            logger.error(f"[{source}] resolution summary failed for {key}; not indexed")
+            return {"outcome": "failed", "ticket_id": key}
+        if dry_run:
+            return {"outcome": "dry_run", "ticket_id": key, "entry": entry,
+                    "message": format_index_message(entry)}
+        replaced = self.case_index.upsert(entry)
+        posted_index = posted_channel = False
+        cid = self.index_channel_id()
+        if cid:
+            posted_index = bool(self.messenger.post_message(cid, format_index_message(entry)))
+        if tracked and tracked.get("channel_id") and not tracked.get("archived"):
+            posted_channel = bool(self.messenger.post_message(tracked["channel_id"],
+                                                              format_index_message(entry, in_channel=True)))
+        if tracked is not None:
+            tracked["indexed"] = True
+        logger.info(f"[{source}] indexed {key}{' (replaced)' if replaced else ''}")
+        return {"outcome": "indexed", "ticket_id": key, "replaced": replaced, "posted_index": posted_index,
+                "posted_channel": posted_channel, "entry": entry}
 
     def summarize_so_far(self, issue: Dict[str, Any], comments: List[Dict[str, Any]],
                          dry_run: bool = False) -> Dict[str, Any]:
@@ -278,7 +355,7 @@ class SyncEngine:
                                                        "archived": False, **snapshot(ticket)}
         return {"success": "created", "skipped": "existed"}.get(result["final_status"], "failed")
 
-    def _sync(self, ticket, tracked, changes, source) -> str:
+    def _sync(self, ticket, tracked, changes, source, issue: Optional[Dict[str, Any]] = None) -> str:
         key, channel_id = ticket["ticket_id"], tracked["channel_id"]
         run = self._run(ticket, source)
         run.record_step(1, "Detect changes", "success", None, details={"changes": changes})
@@ -297,6 +374,12 @@ class SyncEngine:
         sent = self.messenger.send_message(channel_id, format_update_message(ticket, changes, archiving))
         ok &= sent
         run.record_step(3, "Post update", "success" if sent else "failure", time.time() - t)
+        if archiving and self.indexing_for(key):
+            # Last chance to write in the channel: archived channels can't be posted to.
+            t = time.time()
+            outcome = self.close_case(issue or {}, self.fetch_comments(key), tracked=tracked, source=source)
+            run.record_step(3.5, "Resolution summary + case index", "success" if outcome["outcome"] == "indexed" else "failure",
+                            time.time() - t, details={"outcome": outcome["outcome"]})
         if archiving:
             t = time.time()
             archived = self.messenger.archive_channel(channel_id)
@@ -416,6 +499,29 @@ def build_timeline(changelog: List[Dict[str, Any]], comments: List[Dict[str, Any
         events.append({"at": parse_jira_time(c["created"]), "kind": "comment",
                        "who": (c.get("author") or {}).get("displayName", "Unknown"), "text": clean_comment(c.get("body"))})
     return sorted(events, key=lambda e: e["at"])
+
+
+def format_index_message(entry: Dict[str, Any], in_channel: bool = False) -> str:
+    """#case-index message (or the closing note in the ticket's own channel)."""
+    key = entry["ticket_id"]
+    head = (f"*Resolution summary · {key}*" if in_channel else
+            f"*{key}* · {_slack_escape(entry.get('customer') or '?')} · "
+            f"{_slack_escape(entry.get('product_version') or 'no version')} · {entry.get('priority') or '?'}"
+            f" — {_slack_escape(entry.get('title') or '')}")
+    lines = [head,
+             f"*Problem:* {_slack_escape(entry.get('problem') or '-')}",
+             f"*Root cause:* {_slack_escape(entry.get('root_cause') or '-')}",
+             f"*Fix:* {_slack_escape(entry.get('fix') or '-')}"]
+    tail = []
+    if entry.get("components"):
+        tail.append("_" + _slack_escape(", ".join(entry["components"])) + "_")
+    if entry.get("jira_url"):
+        tail.append(f"<{entry['jira_url']}|Open in Jira>")
+    if not in_channel and entry.get("slack_channel_id"):
+        tail.append(f"<#{entry['slack_channel_id']}>")
+    if tail:
+        lines.append(" · ".join(tail))
+    return "\n".join(lines)
 
 
 def case_summary_message(ticket: Dict[str, Any], summary: Optional[str], public: int, internal: int,

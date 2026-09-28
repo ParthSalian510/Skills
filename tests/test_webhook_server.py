@@ -368,18 +368,18 @@ def read_log(log_dir):
 
 
 try:
-    ticket = {"ticket_id": "CASE-4009", "project_key": "CASE", "customer": "ISOC", "priority": "P3"}
+    ticket = {"ticket_id": "CASE-4009", "project_key": "CASE", "customer": "ACME", "priority": "P3"}
     name, errors = ws.channel_name_for(ticket)
-    check("Standard name for P3", name == "case-4009-isoc-low", f"got {name} {errors}")
+    check("Standard name for P3", name == "case-4009-acme-low", f"got {name} {errors}")
     name, _ = ws.channel_name_for({**ticket, "priority": "P2"})
-    check("Standard name for P2", name == "case-4009-isoc-med", f"got {name}")
+    check("Standard name for P2", name == "case-4009-acme-med", f"got {name}")
     name, errors = ws.channel_name_for({**ticket, "customer": None})
     check("Missing customer is an error, not a guess", name is None and bool(errors))
 
     data = WebhookValidator.extract_event_data({"webhookEvent": "jira:issue_created", "issue": {
-        "key": "CASE-4009", "fields": {"customfield_10002": [{"name": "ISOC"}, {"name": "Other"}],
+        "key": "CASE-4009", "fields": {"customfield_10002": [{"name": "ACME"}, {"name": "Other"}],
                                         "project": {"key": "CASE"}}}})
-    check("Customer is first organisation", data["customer"] == "ISOC")
+    check("Customer is first organisation", data["customer"] == "ACME")
     check("Missing priority stays missing", data["priority"] is None)
 except Exception as e:
     failed += 1
@@ -430,8 +430,8 @@ class FakeMessenger:
 
 def jira_issue(key="CASE-4009", status="Pending", priority="P3"):
     return {"key": key, "self": "https://bloo-systems.atlassian.net/rest/api/2/issue/1", "fields": {
-        "summary": "ISOC | High memory", "status": {"name": status}, "priority": {"name": priority},
-        "project": {"key": "CASE"}, "customfield_10002": [{"name": "ISOC"}],
+        "summary": "ACME | High memory", "status": {"name": status}, "priority": {"name": priority},
+        "project": {"key": "CASE"}, "customfield_10002": [{"name": "ACME"}],
         "created": "2020-01-01T00:00:00.000+0000"}}
 
 
@@ -462,7 +462,7 @@ try:
         cb = ws.create_sync_callback(WebhookConfig(secret="s", slack_token="xoxb-test", slack_invite_user_ids=("U1",)))
         cb(event_task("jira:issue_created"))
         entry = read_log(tmp)[-1]
-        check("New channel uses standard name", fake.calls[0] == ("create", "case-4009-isoc-low"))
+        check("New channel uses standard name", fake.calls[0] == ("create", "case-4009-acme-low"))
         check("Success run logs 4 steps", [s["name"] for s in entry["steps"]] == [
             "Generate channel name", "Create channel", "Invite members", "Post starter message"])
         check("Success run final status", entry["summary"]["final_status"] == "success")
@@ -566,7 +566,7 @@ import threading as _threading
 def signed(secret, key):
     body = json.dumps({"webhookEvent": "jira:issue_updated", "issue": {"key": key, "fields": {
         "summary": "x", "status": {"name": "Open"}, "priority": {"name": "P3"},
-        "project": {"key": key.split("-")[0]}, "customfield_10002": [{"name": "ISOC"}]}}}).encode()
+        "project": {"key": key.split("-")[0]}, "customfield_10002": [{"name": "ACME"}]}}}).encode()
     return body, "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 seen, gate = [], _threading.Event()

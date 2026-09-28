@@ -31,19 +31,19 @@ def check(label, condition, details=""):
 
 
 # ---- scrubbing and names
-raw = "Call +91 7039587134 or parth@bloo.io\nhttps://zoom.us/j/1?pwd=x\nMeeting ID: 986 0842 9853\nPasscode: 813965\n=====\nCORE at 160 GB, v9.2.0"
+raw = "Call +91 9000012345 or agent@example.com\nhttps://zoom.us/j/1?pwd=x\nMeeting ID: 986 0842 9853\nPasscode: 813965\n=====\nCORE at 160 GB, v9.2.0"
 clean = sm.scrub(raw)
-check("Phone removed", "7039587134" not in clean and "[phone]" in clean, clean)
-check("E-mail removed", "parth@bloo.io" not in clean)
+check("Phone removed", "9000012345" not in clean and "[phone]" in clean, clean)
+check("E-mail removed", "agent@example.com" not in clean)
 check("Meeting ID and passcode lines removed", "813965" not in clean and "986 0842" not in clean, clean)
 check("URLs replaced", "zoom.us" not in clean and "[link]" in clean)
 check("Technical numbers kept", "160 GB" in clean and "9.2.0" in clean, clean)
 check("Role from account type", sm.role_of({"author": {"accountType": "customer"}}) == "Customer"
       and sm.role_of({"author": {"accountType": "atlassian"}}) == "Support")
-people = [{"author": {"displayName": "Divyesh Aswar", "accountType": "atlassian"}},
-          {"author": {"displayName": "digitalcvp support", "accountType": "customer"}}]
+people = [{"author": {"displayName": "Alex Rivera", "accountType": "atlassian"}},
+          {"author": {"displayName": "acme support", "accountType": "customer"}}]
 names = sm._names(people)
-out = sm.ClaudeCLISummarizer()._clean("Divyesh restarted it; digitalcvp support confirmed; Aswar checked the support queue.", names)
+out = sm.ClaudeCLISummarizer()._clean("Alex restarted it; acme support confirmed; Rivera checked the support queue.", names)
 check("Names replaced by role in one pass (no chaining)",
       out == "support restarted it; the customer confirmed; support checked the support queue.", out)
 
@@ -60,10 +60,10 @@ def runner_returning(payload, raise_exc=None):
 with tempfile.TemporaryDirectory() as tmp:
     ok = sm.ClaudeCLISummarizer(claude_path="/bin/claude", workdir=Path(tmp),
                                 runner=runner_returning({"type": "result", "subtype": "success", "is_error": False,
-                                                         "result": "*Problem:* Adapters offline. Call +91 7039587134."}))
-    ticket = {"ticket_id": "CASE-1", "summary": "ISOC | adapters", "status": "Pending", "priority": "P2"}
-    comments = [{"id": "10", "created": "2026-09-21T10:00:00.000+0530", "body": "Hello, adapters are offline. Regards, Divyesh",
-                 "author": {"displayName": "Divyesh Aswar", "accountType": "atlassian"}}]
+                                                         "result": "*Problem:* Adapters offline. Call +91 9000012345."}))
+    ticket = {"ticket_id": "CASE-1", "summary": "ACME | adapters", "status": "Pending", "priority": "P2"}
+    comments = [{"id": "10", "created": "2026-09-21T10:00:00.000+0530", "body": "Hello, adapters are offline. Regards, Alex",
+                 "author": {"displayName": "Alex Rivera", "accountType": "atlassian"}}]
     result = ok.case_summary(ticket, comments, str)
     cmd, kw = calls[-1]
     check("Case summary returned and scrubbed", result == "*Problem:* Adapters offline. Call [phone].", result)
@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory() as tmp:
           and "--disable-slash-commands" in cmd and "--no-session-persistence" in cmd)
     check("Runs in its own empty directory", kw["cwd"] == tmp)
     check("Has a timeout", kw["timeout"] == 180)
-    check("Prompt has roles, not names", "[Support · 2026-09-21]" in kw["input"] and "Divyesh Aswar" not in kw["input"].split("Comments")[1].split("]")[0])
+    check("Prompt has roles, not names", "[Support · 2026-09-21]" in kw["input"] and "Alex Rivera" not in kw["input"].split("Comments")[1].split("]")[0])
     check("Comment text wrapped as data", "<ticket>" in kw["input"] and "</ticket>" in kw["input"])
 
     noop = sm.ClaudeCLISummarizer(workdir=Path(tmp), runner=runner_returning(
@@ -113,9 +113,9 @@ class FakeSummarizer:
 
 def issue(status="Pending"):
     return {"key": "CASE-3997", "self": "https://api.atlassian.com/ex/jira/x/rest/api/3/issue/1", "fields": {
-        "summary": "ISOC | memory", "status": {"name": status}, "priority": {"name": "P2"},
+        "summary": "ACME | memory", "status": {"name": status}, "priority": {"name": "P2"},
         "assignee": {"displayName": "Parth Salian"}, "issuetype": {"name": "[System] Problem"},
-        "project": {"key": "CASE"}, "customfield_10002": [{"name": "ISOC"}], "created": "2026-09-03T15:01:58.950+0530"}}
+        "project": {"key": "CASE"}, "customfield_10002": [{"name": "ACME"}], "created": "2026-09-03T15:01:58.950+0530"}}
 
 def c(id_, public=True, text="note"):
     return {"id": str(id_), "created": "2026-09-28T10:00:00.000+0530", "jsdPublic": public, "body": text,
@@ -125,7 +125,7 @@ with tempfile.TemporaryDirectory() as tmp:
     os.environ["CTC_LOG_DIR"] = tmp
     state = se.ChannelState(Path(tmp) / "channels.json")
     with state.locked():
-        state.tickets["CASE-3997"] = {"channel_id": "C1", "channel_name": "case-3997-isoc-med", "archived": False}
+        state.tickets["CASE-3997"] = {"channel_id": "C1", "channel_name": "case-3997-acme-med", "archived": False}
     jira_comments = [c(100), c(101)]
     slack, fake = FakeSlack(), FakeSummarizer()
     eng = se.SyncEngine(slack, state, ["Completed"], summarizer=fake, fetch_comments=lambda k: list(jira_comments),

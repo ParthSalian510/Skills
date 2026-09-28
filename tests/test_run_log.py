@@ -53,9 +53,9 @@ with tempfile.TemporaryDirectory() as tmp:
           {run_log.log_path_for(s).name for s in run_log.LOG_FILES} == {"tests.jsonl"})
     check("Test mode overrides the record's mode", run_log.resolve_mode("live") == "test")
 
-    log = AuditLogger("CASE-1", "CASE", "ISOC", "P3", source="webhook", mode="live")
+    log = AuditLogger("CASE-1", "CASE", "ACME", "P3", source="webhook", mode="live")
     log.record_step(1, "Generate channel name", "success", None)
-    entry = log.finalize("case-1-isoc-low", "success")
+    entry = log.finalize("case-1-acme-low", "success")
     check("AuditLogger defaults to per-source path", log.log_path == Path(tmp) / "tests.jsonl")
     check("Record has source/mode", entry["source"] == "webhook" and entry["mode"] == "test")
     check("Unknown duration is omitted, not zero", "duration_seconds" not in entry["steps"][0])
@@ -64,8 +64,8 @@ with tempfile.TemporaryDirectory() as tmp:
     steps = json.dumps([{"step": 0, "name": "Pre-flight checks", "status": "success", "duration_seconds": 2.1},
                         {"step": 4, "name": "Browser automation", "status": "success"}])
     out = subprocess.run([sys.executable, str(SCRIPTS / "run_log.py"), "--source", "skill", "--mode", "live",
-                          "--ticket", "CASE-4010", "--customer", "ISOC", "--priority", "P3",
-                          "--channel", "case-4010-isoc-low", "--final", "success", "--duration-seconds", "41.5",
+                          "--ticket", "CASE-4010", "--customer", "ACME", "--priority", "P3",
+                          "--channel", "case-4010-acme-low", "--final", "success", "--duration-seconds", "41.5",
                           "--steps", steps], env=live_env, capture_output=True, text=True)
     check("CLI exits 0", out.returncode == 0, out.stderr)
     rec = lines(Path(tmp) / "skill-runs.jsonl")[-1]

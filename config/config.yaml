@@ -221,6 +221,16 @@ tier_2:
       timeout_seconds: 180
       # claude_path: /home/<user>/.local/bin/claude   # default: found on PATH
 
+    # Case index: when a ticket closes (archive_on_status), Claude writes a
+    # resolution summary (problem / root cause / fix / components) that is
+    # posted in the ticket channel before archiving, posted to #case-index,
+    # and saved to index/cases.jsonl (gitignored: customer case details).
+    # Search: python3 scripts/case_index.py search "namenode oom"
+    case_index:
+      enabled: true
+      slack_channel: case-index
+      tickets: ["*"]            # closing tickets to index; one summary per case
+
     archive_on_status:
       - "Done"
       - "Resolved"

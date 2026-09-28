@@ -26,6 +26,7 @@ What each file is for, and whether it runs for real:
 | `scripts/jira_poller.py` | Autonomous sync + `backfill`; systemd service `ctc-jira-poller` | Yes, test workspace |
 | `scripts/sync_engine.py` | Shared create/sync/archive/backfill logic and `state/channels.json` | Yes, test workspace |
 | `scripts/summarizer.py` | Comment → summary via `claude -p` (no names, scrubbed, tools off) | Yes, CASE-3997 only |
+| `scripts/case_index.py` | Index of closed cases (`index/cases.jsonl`, gitignored) + search CLI | Yes |
 | `scripts/webhook_server.py` | Slack client, starter formatter, Jira-webhook receiver (queue + worker) | Client/formatter yes; webhook receiver built and tested but not connected (no Jira-side webhook) |
 | `scripts/ticket_sync.py` | Topic/emoji formatting (used by the sync engine); `TicketSyncManager` only *plans* actions | Formatting yes; manager no |
 | `scripts/audit_logger.py` | Writes one run record per run | Yes |
@@ -927,6 +928,30 @@ python3 scripts/jira_poller.py summarize CASE-3997 --dry-run   # preview a case 
 python3 scripts/jira_poller.py summarize CASE-3997             # post it and start updates from here
 ```
 
+**Case index** (`scripts/case_index.py`, config `tier_2.sync.case_index`):
+when a tracked ticket reaches a status in `archive_on_status`, Claude writes
+a resolution summary (problem, root cause, fix, components, search keywords).
+It is posted in the ticket's channel just before archiving, posted as one
+message in `#case-index`, and saved to `index/cases.jsonl`.
+- `#case-index` is created on first use, with the invite list added. Its ID
+  is kept in `state/channels.json` under `meta.index_channel_id`.
+- `index/` is **gitignored**: it holds customer case details, and the repo
+  is public.
+- If the summary fails, nothing is posted and the channel is still archived;
+  re-run it with `index KEY`.
+- Re-indexing a ticket replaces its entry.
+
+```bash
+python3 scripts/jira_poller.py index CASE-4009 [CASE-…] [--dry-run]   # index closed tickets (past cases too)
+python3 scripts/jira_poller.py index-channel C0123ABCD                # use an existing channel as #case-index
+python3 scripts/case_index.py search "namenode oom"                   # best matches first
+python3 scripts/case_index.py show CASE-4009 | list
+```
+
+After changing code or config, restart the service (`systemctl --user
+restart ctc-jira-poller`) **before** running these commands. A service still
+on old code rewrites `state/channels.json` in the old shape.
+
 **Backfill** (`jira_poller.py backfill KEY [--dry-run]`) creates the channel
 for a ticket that's already in progress or closed, then replays its history.
 The starter message shows the ticket as the team first saw it: changes made
@@ -987,6 +1012,10 @@ Every component writes **one JSON line per run** to its own file in `logs/`
 | `logs/poller.jsonl` | `scripts/jira_poller.py`, one record per channel created/synced, plus Jira outages | `live` |
 | `logs/executor.jsonl` | `scripts/skill_executor.py` — placeholder data only, never a real run | `placeholder`, `dry_run` |
 | `logs/tests.jsonl` | `tests/run_all.py` and anything run with `CTC_RUN_MODE=test` | `test` |
+
+The log files stay on this machine: `logs/*.jsonl` is gitignored because
+records contain ticket keys, customers and channel names, and the repo is
+public.
 
 `CTC_RUN_MODE=test` routes every source to `tests.jsonl`, so test and
 simulated runs never mix with real ones. All test scripts set it.
