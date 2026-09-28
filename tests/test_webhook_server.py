@@ -501,5 +501,24 @@ finally:
     ws.SlackMessenger = real_messenger
 
 # Summary
+
+# Removed from a channel (e.g. after a token revoke): rejoin and retry once.
+class ScriptedMessenger(ws.SlackMessenger):
+    def __init__(self, replies):
+        self.token, self.base_url, self.replies, self.sent = "xoxb-test", "", list(replies), []
+
+    def _post(self, method, data):
+        self.sent.append(method)
+        return self.replies.pop(0)
+
+m = ScriptedMessenger([{"ok": False, "error": "not_in_channel"}, {"ok": True}, {"ok": True, "ts": "1.2"}])
+check("not_in_channel → rejoin → retry succeeds", m.post_message("C1", "hi") == "1.2", m.sent)
+check("Rejoin uses conversations.join between attempts",
+      m.sent == ["chat.postMessage", "conversations.join", "chat.postMessage"], m.sent)
+m = ScriptedMessenger([{"ok": False, "error": "not_in_channel"}, {"ok": False, "error": "missing_scope"}])
+check("Failed rejoin reports failure without retry loop", m.set_topic("C1", "t") is False and len(m.sent) == 2, m.sent)
+m = ScriptedMessenger([{"ok": False, "error": "channel_not_found"}])
+check("Other errors are not retried", m.archive_channel("C1") is False and m.sent == ["conversations.archive"], m.sent)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

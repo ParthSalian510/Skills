@@ -113,36 +113,21 @@ class SlackMessenger:
 
     def send_message(self, channel_id: str, text: str, blocks: Optional[list] = None) -> bool:
         """Send a message to a Slack channel."""
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        }
-        data = {
-            "channel": channel_id,
-            "text": text,
-        }
+        data = {"channel": channel_id, "text": text}
         if blocks:
             data["blocks"] = blocks
-
         try:
-            response = requests.post(
-                f"{self.base_url}/chat.postMessage",
-                headers=headers,
-                json=data,
-            )
-            response.raise_for_status()
-            result = response.json()
-            if result.get("ok"):
-                logger.info(f"Message sent to channel {channel_id}")
-                return True
-            else:
-                logger.error(f"Failed to send message: {result.get('error')}")
-                return False
+            result = self._call("chat.postMessage", data)
         except Exception as e:
             logger.error(f"Error sending message: {e}")
             return False
+        if result.get("ok"):
+            logger.info(f"Message sent to channel {channel_id}")
+            return True
+        logger.error(f"Failed to send message: {result.get('error')}")
+        return False
 
-    def _call(self, method: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _post(self, method: str, data: Dict[str, Any]) -> Dict[str, Any]:
         response = requests.post(
             f"{self.base_url}/{method}",
             headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
@@ -151,6 +136,18 @@ class SlackMessenger:
         )
         response.raise_for_status()
         return response.json()
+
+    def _call(self, method: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Call a Slack method; if the bot has been removed from the channel, rejoin it and retry once."""
+        result = self._post(method, data)
+        if result.get("error") == "not_in_channel" and data.get("channel"):
+            joined = self._post("conversations.join", {"channel": data["channel"]})
+            if joined.get("ok"):
+                logger.info(f"Rejoined channel {data['channel']} after not_in_channel on {method}")
+                result = self._post(method, data)
+            else:
+                logger.error(f"Could not rejoin {data['channel']}: {joined.get('error')}")
+        return result
 
     def post_message(self, channel_id: str, text: str, thread_ts: Optional[str] = None) -> Optional[str]:
         """Post a message (optionally as a thread reply); returns its ts, or None on failure."""
@@ -190,27 +187,16 @@ class SlackMessenger:
 
     def invite_users(self, channel_id: str, user_ids: List[str]) -> bool:
         """Invite users to a channel."""
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        }
-        data = {"channel": channel_id, "users": ",".join(user_ids)}
         try:
-            response = requests.post(
-                f"{self.base_url}/conversations.invite",
-                headers=headers,
-                json=data,
-            )
-            response.raise_for_status()
-            result = response.json()
-            if result.get("ok") or result.get("error") == "already_in_channel":
-                logger.info(f"Invited {', '.join(user_ids)} to channel {channel_id}")
-                return True
-            logger.error(f"Failed to invite users: {result.get('error')}")
-            return False
+            result = self._call("conversations.invite", {"channel": channel_id, "users": ",".join(user_ids)})
         except Exception as e:
             logger.error(f"Error inviting users: {e}")
             return False
+        if result.get("ok") or result.get("error") == "already_in_channel":
+            logger.info(f"Invited {', '.join(user_ids)} to channel {channel_id}")
+            return True
+        logger.error(f"Failed to invite users: {result.get('error')}")
+        return False
 
 
 ORGANIZATIONS_FIELD = "customfield_10002"
