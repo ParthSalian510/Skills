@@ -387,9 +387,9 @@ class SkillExecutor:
             )
 
             if result["status"] == "success":
-                print(f"  ✓ Ticket sync completed ({duration:.2f}s)")
+                print(f"  ✓ Ticket sync planned ({duration:.2f}s) — no Slack calls; sync_engine.py applies changes")
                 if result["changes_detected"]:
-                    print(f"    - Updated topic with {list(result['changes'].keys())}")
+                    print(f"    - Would update topic with {list(result['changes'].keys())}")
                 else:
                     print(f"    - No changes to sync")
             else:

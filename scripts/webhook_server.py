@@ -303,6 +303,28 @@ def format_starter_message(ticket_data: Dict[str, Any]) -> Dict[str, Any]:
     return {"text": "\n".join(lines), "blocks": None}
 
 
+def jira_browse_base(issue: Dict[str, Any]) -> str:
+    """Base URL people open tickets at, e.g. https://bloo-systems.atlassian.net.
+
+    Issues fetched through the api.atlassian.com gateway (scoped tokens, MCP) have a
+    gateway "self" URL whose /browse/ link doesn't open; use the site from config instead.
+    """
+    web_url = issue.get("webUrl") or ""
+    if "/browse/" in web_url:
+        return web_url.split("/browse/")[0]
+    base = (issue.get("self") or "").split("/rest/")[0]
+    if base and "api.atlassian.com" not in base:
+        return base
+    if os.environ.get("JIRA_BASE_URL"):
+        return os.environ["JIRA_BASE_URL"].rstrip("/")
+    try:
+        import yaml
+        site = (yaml.safe_load(NAMING_CONFIG_PATH.read_text()).get("jira") or {}).get("site")
+    except Exception:
+        site = None
+    return f"https://{site}" if site else ""
+
+
 class WebhookValidator:
     """Validates Jira webhook signatures and extracts event data."""
 
@@ -352,7 +374,7 @@ class WebhookValidator:
             ticket_id = issue.get("key")
 
             organisations = [o.get("name") for o in fields.get(ORGANIZATIONS_FIELD) or [] if o.get("name")]
-            base_url = (issue.get("self") or "").split("/rest/")[0] or os.environ.get("JIRA_BASE_URL", "")
+            base_url = jira_browse_base(issue)
 
             return {
                 "ticket_id": ticket_id,

@@ -47,6 +47,12 @@ jira:
   # ticket from a different project returns null here.
   customer_field: customfield_10002
 
+# Chat-skill behaviour (SKILL.md)
+skill:
+  # Post the team's starter message in every newly created channel (Step 7).
+  # The user can still opt out per run ("no starter message").
+  starter_message: true
+
 slack:
   mcp: slack
 

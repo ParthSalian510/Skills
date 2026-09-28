@@ -190,7 +190,8 @@ class TicketSyncManager:
                 self._log_sync(result)
                 return result
 
-            # Apply updates
+            # Work out what should change. This class makes no Slack calls, so every
+            # action is "planned"; sync_engine.py is what actually performs them.
             actions = []
 
             # Update topic if status or priority changed
@@ -203,7 +204,7 @@ class TicketSyncManager:
                 actions.append({
                     "action": "update_topic",
                     "value": topic,
-                    "status": "completed"
+                    "status": "planned"
                 })
 
             # Update pinned message
@@ -212,7 +213,7 @@ class TicketSyncManager:
             )
             actions.append({
                 "action": "update_pinned_message",
-                "status": "completed"
+                "status": "planned"
             })
 
             # Check if should archive
@@ -222,7 +223,7 @@ class TicketSyncManager:
             ):
                 actions.append({
                     "action": "archive_channel",
-                    "status": "completed"
+                    "status": "planned"
                 })
 
             result["actions_taken"] = actions

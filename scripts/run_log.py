@@ -47,7 +47,40 @@ def _parse_steps(raw: str) -> list:
     return steps
 
 
+def known_channels(ticket: str) -> list:
+    """Channels this skill has already created or found for a ticket, from logs/skill-runs.jsonl.
+
+    Live runs only (never dry runs, tests or placeholders). Used by Step 3 before
+    the Slack search, because the search index can lag right after a channel is
+    created.
+    """
+    path = log_dir() / LOG_FILES["skill"]
+    if not path.exists():
+        return []
+    found = []
+    for line in path.read_text().splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (rec.get("ticket_id") or "").upper() != ticket.upper() or rec.get("mode") != "live":
+            continue
+        final = (rec.get("summary") or {}).get("final_status")
+        ok = final in ("success", "skipped") or (rec.get("legacy_format") and rec.get("jira_channel_action"))
+        if ok and rec.get("channel_name") and rec["channel_name"] not in found:
+            found.append(rec["channel_name"])
+    return found
+
+
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["lookup"]:
+        if len(argv) != 2:
+            print("usage: run_log.py lookup TICKET", file=sys.stderr)
+            return 2
+        channels = known_channels(argv[1])
+        print(json.dumps({"ticket_id": argv[1].upper(), "known_channels": channels}))
+        return 0
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from audit_logger import AuditLogger
 

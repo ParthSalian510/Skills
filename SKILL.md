@@ -13,6 +13,28 @@ Automates: Jira ticket → generate `<ticket-id>-<customer>-<priority>` channel 
 
 > **Status:** Steps 1, 2, 3, 5, 6, 7 are implemented and verified against live Jira/Slack data (Step 7, the starter message, added and verified live against CASE-3997 and CASE-3998 — see Step 7 below). Step 4 (the browser action) was blocked by a machine-wide EDR restriction on Chrome's CDP (used by Public Browser); switching to chrome-bridge (extension-based, no CDP) unblocked it — trigger button, iframe, and create-button selectors are now verified live against SR-4028, SR-4058, CASE-3997, and CASE-3998. **Step 8 (adding members to the channel) is NOT implemented** — it was attempted live and every approach failed; see "Step 8" below before attempting this again.
 
+## Folder Map
+
+What each file is for, and whether it runs for real:
+
+| Path | Role | Runs for real? |
+|---|---|---|
+| `SKILL.md` | This chat pipeline (Steps 0–8), run by Claude with MCP tools + chrome-bridge | Yes, in Bloo |
+| `scripts/generate_channel_name.py` | Channel name standard (`case-4009-isoc-low`); every path uses it | Yes |
+| `scripts/starter_message.py` | Builds the Step 7 starter message from getJiraIssue JSON | Yes |
+| `scripts/run_log.py` | Run-log paths, the Step 6 CLI, and `lookup` for Step 3 | Yes |
+| `scripts/jira_poller.py` | Autonomous sync + `backfill`; systemd service `ctc-jira-poller` | Yes, test workspace |
+| `scripts/sync_engine.py` | Shared create/sync/archive/backfill logic and `state/channels.json` | Yes, test workspace |
+| `scripts/webhook_server.py` | Slack client, starter formatter, Jira-webhook receiver (queue + worker) | Client/formatter yes; webhook receiver built and tested but not connected (no Jira-side webhook) |
+| `scripts/ticket_sync.py` | Topic/emoji formatting (used by the sync engine); `TicketSyncManager` only *plans* actions | Formatting yes; manager no |
+| `scripts/audit_logger.py` | Writes one run record per run | Yes |
+| `scripts/skill_executor.py` | Offline simulation of the pipeline with **placeholder data**; never touches Jira/Slack. Its step numbers differ (6 = sync, 7 = log, 8 = starter): SKILL.md's numbering is the authoritative one | No |
+| `scripts/timeout_wrapper.py`, `retry_logic.py`, `error_messages.py` | Helpers used by the executor | No (executor only) |
+| `deploy/` | systemd unit + installer for the poller | Yes |
+| `config/config.yaml` | Jira/Slack ids, naming rules, `skill.*`, `tier_2.sync` | Yes |
+| `tests/` | `python3 tests/run_all.py` runs everything; `fixtures/` holds a real MCP response | — |
+| `docs/` | Earlier design and test guides; SKILL.md wins where they disagree | — |
+
 ## When to Use
 
 - `/create-ticket-channel <TICKET-ID>` or `/create-ticket-channel <TICKET-ID> --dry-run`
@@ -28,14 +50,14 @@ Do NOT use for tickets that aren't customer tickets, or when the user wants an e
 0. Pre-flight checks              → Verify all dependencies ready
 1. Fetch ticket metadata          → Atlassian MCP only
 2. Generate channel name          → scripts/generate_channel_name.py (deterministic)
-3. Check if channel already exists → Slack MCP only
+3. Check if channel already exists → run log lookup, then Slack MCP search
 4. If exists  → report and STOP (no browser)
    If missing → chrome-bridge: open ticket → click "Open Slack discussions" →
                 locate iframe → click "Create another channel..." →
                 type name → submit → confirm
 5. Verify via Slack MCP
 6. Write audit log entry, report result
-7. (optional, only if asked) Post starter message → Slack MCP (slack_send_message), no browser
+7. Post starter message (default; skip only if the user opts out) → scripts/starter_message.py + Slack MCP
 8. (NOT IMPLEMENTED) Add members to channel   → see "Step 8" below before attempting
 ```
 
@@ -149,7 +171,7 @@ Stop immediately. Do not proceed to Step 1.
 
 Call `getJiraIssue` for the ticket key against cloudId in `config/config.yaml`
 (`jira.cloud_id`). Request only the fields you need — pass
-`fields: ["summary", "issuetype", "priority", "project", "customfield_10002", "status"]`,
+`fields: ["summary", "issuetype", "priority", "project", "customfield_10002", "status", "description", "customfield_10171", "customfield_10194"]`,
 not `*all` (the unfiltered response for a real ticket ran ~195K characters and
 blew the tool's response limit).
 
@@ -174,6 +196,9 @@ Map (verified live against SR-4028 — see `jira.ticket_type_field` /
 If the issue is not found, **stop** — do not open the browser. Report:
 `Ticket not found.`
 
+Save the raw getJiraIssue result to a scratch file (e.g.
+`<scratchpad>/<ticket>.json`); Step 7 builds the starter message from it.
+
 ### Step 2 — Generate channel name (deterministic script)
 
 ```bash
@@ -192,7 +217,23 @@ the single source of truth for the naming convention and its normalization
 rules (documented inline in `scripts/generate_channel_name.py` — customer
 normalization and priority mapping are both spelled out there).
 
-### Step 3 — Duplicate check (Slack MCP, no browser)
+### Step 3 — Duplicate check (run log first, then Slack MCP; no browser)
+
+**First, check this skill's own record** of channels it has created:
+
+```bash
+python3 scripts/run_log.py lookup "$TICKET_ID"
+# {"ticket_id": "CASE-4009", "known_channels": ["case-4009-isoc-low"]}
+```
+
+If `known_channels` is non-empty, treat the channel as existing and stop,
+even if the Slack search below comes back empty. Slack's search index can
+lag several minutes behind a newly created channel (seen on CASE-3998), and
+the run log doesn't. If the search finds nothing but the run log has a
+channel, report both facts so the user can check whether it was deleted.
+
+**Then** search Slack (this also catches channels created by hand or by
+someone else):
 
 **Search by ticket_id, not by the exact generated name.** Call
 `slack_search_channels(query: ticket_id, channel_types: "public_channel,private_channel", include_archived: true)`.
@@ -360,34 +401,59 @@ python3 scripts/run_log.py --source skill --mode live \
 The script prints `{"run_id", "log"}`; the record goes to
 `logs/skill-runs.jsonl`. See "Run Logs" below for the shape.
 
-### Step 7 — Starter message (optional, only if explicitly asked)
+### Step 7 — Starter message (default, config `skill.starter_message`)
 
-**Implemented and verified live** (CASE-3997, CASE-3998, 2026-09-04). Only
-runs when the user explicitly asks for a starter message alongside channel
-creation — it is not part of the default pipeline.
+The team posts a starter message in every new ticket channel, so this runs
+by default after Step 5 verifies a **newly created** channel. Skip it only
+when the user opts out ("no starter message") or `skill.starter_message` is
+`false` in config.yaml. Never post it into a channel that already existed
+(Step 3 stop).
 
-Post via `slack_send_message` (Slack MCP) to the newly created channel's ID
-(from Step 5's verification result) — no browser needed, this is a plain
-Slack API call. Use this template, filling each field from data already
-fetched in Step 1 (fall back to "Not tracked in Jira for this ticket" or
-similar for anything not available):
+**Build the text with the script, not by writing it yourself:**
 
-```
-*Organisation:* {customer}
-*Title:* {summary}
-*Priority check:* {priority}
-*Type Check:* {issuetype.name} ({ticket_type})
-*Product Version Check:* {if available, else "Not tracked in Jira for this ticket"}
-*Description:* {a short plain-language summary of the ticket description/status}
-
-Jira: {jira_url}
+```bash
+python3 scripts/starter_message.py <scratchpad>/<ticket>.json
 ```
 
-This exact field template (`Organisation:` / `Title:` / `Priority check:` /
+It reads the getJiraIssue result saved in Step 1 and prints the message
+using the same formatter as the autonomous poller:
+- Product Version comes from `customfield_10171`, falling back to `customfield_10194`.
+- Greetings and sign-offs are stripped from the description, which is then cut to 500 characters.
+- The Jira link points at the real site, not the API gateway.
+
+Post its stdout **verbatim** via `slack_send_message` to the channel ID from
+Step 5. Don't rephrase, summarise or add to it. Exit code 1 means the file had no
+issue in it: re-run Step 1 rather than hand-writing the message.
+
+Output shape (CASE-4009):
+
+```
+*Organisation:* ISOC
+*Title:* ISOC|AD servers went offline
+*Priority check:* P2
+*Type Check:* [System] Problem (CASE)
+*Product Version Check:* 9.2.0
+*Description:* Most of the Adapters went to offline. Kindly check. Status: Completed.
+
+*Jira:* <https://bloo-systems.atlassian.net/browse/CASE-4009|CASE-4009>
+```
+
+The field template (`Organisation:` / `Title:` / `Priority check:` /
 `Type Check:` / `Product Version Check:` / `Description:`) was given directly
-by the user — do not redesign it without being asked.
+by the user. Don't redesign it without being asked; to change it, edit
+`format_starter_message` in `scripts/webhook_server.py` so every path changes together.
 
 ### Step 8 — Adding members (NOT IMPLEMENTED — blocked, do not attempt without new information)
+
+> **What works today, and what would unblock this.** The autonomous path
+> already invites people with a Slack **bot token**
+> (`SlackMessenger.invite_users`, `SLACK_INVITE_USER_IDS`). It is verified
+> in the test workspace "Claude Test Rep" only. To do the same from this
+> skill in Bloo, Bloo needs its own bot app with `channels:manage`, plus
+> `groups:write` because Slack for Jira creates private channels. The bot
+> must also be a member of the channel. That's a decision for when the
+> skill moves to Bloo. Until then, members are added by hand, and the
+> browser attempts below stay abandoned.
 
 **Status: attempted live against `case-3997-isoc-low` on 2026-09-04, every
 approach failed.** There is no Slack MCP tool that can invite a user or user
