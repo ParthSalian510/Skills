@@ -90,9 +90,17 @@ def format_update_message(ticket: Dict[str, Any], changes: Dict[str, Dict[str, A
 
 
 class SyncEngine:
-    def __init__(self, messenger, state: ChannelState, archive_statuses: List[str], invite_user_ids=()):
+    def __init__(self, messenger, state: ChannelState, archive_statuses: List[str], invite_user_ids=(),
+                 summarizer=None, fetch_comments=None, summary_tickets=()):
+        """summarizer + fetch_comments(key) turn on comment summaries for summary_tickets ("*" = all tracked)."""
         self.messenger, self.state = messenger, state
         self.archive_statuses, self.invite_user_ids = archive_statuses, tuple(invite_user_ids)
+        self.summarizer, self.fetch_comments = summarizer, fetch_comments
+        self.summary_tickets = {k.upper() for k in summary_tickets}
+
+    def summaries_for(self, key: str) -> bool:
+        return bool(self.summarizer and self.fetch_comments and
+                    ("*" in self.summary_tickets or key.upper() in self.summary_tickets))
 
     def process(self, issue: Dict[str, Any], source: str, is_new: Optional[bool] = None) -> str:
         """Apply one Jira issue snapshot. is_new=True (issue_created event) skips the created-after-start check."""
@@ -112,12 +120,80 @@ class SyncEngine:
                 return "inactive"
             if "status" not in tracked:
                 tracked.update(snapshot(ticket))
+                if self.summaries_for(key):
+                    self._sync_comments(ticket, tracked, source)  # first sight: only records the cursor
                 return "baselined"
             changes = {f: {"old": tracked.get(f), "new": ticket.get(f)} for f in TRACKED_FIELDS
                        if tracked.get(f) != ticket.get(f)}
-            if not changes:
-                return "unchanged"
-            return self._sync(ticket, tracked, changes, source)
+            result = self._sync(ticket, tracked, changes, source) if changes else "unchanged"
+            if self.summaries_for(key) and not tracked.get("archived"):
+                comment_result = self._sync_comments(ticket, tracked, source)
+                if comment_result and result == "unchanged":
+                    result = comment_result
+            return result
+
+    def _sync_comments(self, ticket: Dict[str, Any], tracked: Dict[str, Any], source: str) -> Optional[str]:
+        """Post a summary of public comments added since the last one seen. Caller holds the state lock.
+
+        The first time a ticket is seen, only the cursor (highest comment id) is recorded, so switching this
+        on never floods a channel with old history. The cursor always advances, even when the summary fails,
+        so a broken summarizer can't re-post the same comments every minute.
+        """
+        key, channel_id = ticket["ticket_id"], tracked["channel_id"]
+        comments = self.fetch_comments(key)
+        newest = max((int(c["id"]) for c in comments if str(c.get("id", "")).isdigit()), default=0)
+        if "last_comment_id" not in tracked:
+            tracked["last_comment_id"] = newest
+            return None
+        last = int(tracked["last_comment_id"])
+        public = [c for c in comments if c.get("jsdPublic") is not False and str(c.get("id", "")).isdigit()]
+        new = [c for c in public if int(c["id"]) > last]
+        tracked["last_comment_id"] = max(newest, last)
+        if not new:
+            return None
+        run = self._run(ticket, source)
+        t = time.time()
+        body = self.summarizer.update(ticket, new, [c for c in public if int(c["id"]) <= last], clean_comment)
+        n = f"{len(new)} new public comment{'s' if len(new) != 1 else ''}"
+        if body == "":
+            run.record_step(1, "Summarise comments", "skipped", time.time() - t,
+                            details={"comments": len(new), "reason": "nothing of substance"})
+            run.finalize(tracked.get("channel_name"), "skipped")
+            return "comments_skipped"
+        run.record_step(1, "Summarise comments", "success" if body else "failure", time.time() - t,
+                        details={"comments": len(new)})
+        text = (f"*Update · {key}* · {n}\n{body}" if body else
+                f"*Update · {key}* · {n}. Summary unavailable right now, see Jira.")
+        if ticket.get("url"):
+            text += f"\n<{ticket['url']}|Open in Jira>"
+        posted = bool(self.messenger.post_message(channel_id, text))
+        run.record_step(2, "Post summary", "success" if posted else "failure", None)
+        run.finalize(tracked.get("channel_name"), "success" if posted and body else "failure")
+        logger.info(f"[{source}] summarised {n} on {key}")
+        return "summarized" if posted and body else "failed"
+
+    def summarize_so_far(self, issue: Dict[str, Any], comments: List[Dict[str, Any]],
+                         dry_run: bool = False) -> Dict[str, Any]:
+        """Post a one-off case summary into a tracked ticket's channel and start comment summaries from here."""
+        ticket = WebhookValidator.extract_event_data({"webhookEvent": "jira:summary", "issue": issue})
+        key = ticket["ticket_id"]
+        public = [c for c in comments if c.get("jsdPublic") is not False]
+        summary = self.summarizer.case_summary(ticket, public, clean_comment) if self.summarizer else None
+        text = case_summary_message(ticket, summary, len(public), len(comments) - len(public), so_far=True)
+        if dry_run:
+            return {"outcome": "dry_run", "ticket_id": key, "message": text}
+        with self.state.locked():
+            tracked = self.state.tickets.get(key)
+            if not tracked or not tracked.get("channel_id"):
+                return {"outcome": "not_tracked", "ticket_id": key, "message": text}
+            if summary is None:
+                return {"outcome": "failed", "ticket_id": key, "message": text}
+            posted = bool(self.messenger.post_message(tracked["channel_id"], text))
+            if posted:
+                tracked["last_comment_id"] = max((int(c["id"]) for c in comments if str(c.get("id", "")).isdigit()),
+                                                 default=int(tracked.get("last_comment_id") or 0))
+            return {"outcome": "posted" if posted else "failed", "ticket_id": key,
+                    "channel_id": tracked["channel_id"], "message": text}
 
     def backfill(self, issue: Dict[str, Any], changelog: List[Dict[str, Any]], comments: List[Dict[str, Any]],
                   source: str = "poller", dry_run: bool = False, pause: float = 1.1) -> Dict[str, Any]:
@@ -133,6 +209,11 @@ class SyncEngine:
                   f"now *{ticket.get('status')}* · {sum(e['kind'] == 'change' for e in timeline)} changes · "
                   f"{sum(e['kind'] == 'comment' for e in timeline)} public comments "
                   f"({internal} internal notes not included) · times as shown in Jira")
+        if self.summarizer:
+            public = [c for c in comments if c.get("jsdPublic") is not False]
+            summary = self.summarizer.case_summary(ticket, public, clean_comment)
+            header = case_summary_message(ticket, summary, len(public), internal)
+            timeline = [e for e in timeline if e["kind"] == "change"]  # comments live in the summary, not copied
         plan = {"ticket_id": key, "opening": snapshot(opening), "current": snapshot(ticket), "header": header,
                 "timeline": [format_event(e) for e in timeline]}
         if dry_run:
@@ -174,7 +255,9 @@ class SyncEngine:
                 archived = self.messenger.archive_channel(channel_id)
                 run.record_step(7, "Archive channel", "success" if archived else "failure", None)
             self.state.tickets[key] = {"channel_id": channel_id, "channel_name": result["channel_name"],
-                                       "archived": archived, **current}
+                                       "archived": archived, **current,
+                                       "last_comment_id": max((int(c["id"]) for c in comments
+                                                               if str(c.get("id", "")).isdigit()), default=0)}
             ok = result["final_status"] == "success" and replay_ok and topic_ok and summary_ok
             run.finalize(result["channel_name"], "success" if ok else "failure")
             return {"outcome": "backfilled" if ok else "partial", "channel_id": channel_id,
@@ -333,6 +416,20 @@ def build_timeline(changelog: List[Dict[str, Any]], comments: List[Dict[str, Any
         events.append({"at": parse_jira_time(c["created"]), "kind": "comment",
                        "who": (c.get("author") or {}).get("displayName", "Unknown"), "text": clean_comment(c.get("body"))})
     return sorted(events, key=lambda e: e["at"])
+
+
+def case_summary_message(ticket: Dict[str, Any], summary: Optional[str], public: int, internal: int,
+                         so_far: bool = False) -> str:
+    """Parent message for a case summary. Without a summary (the call failed) it says so instead of copying comments."""
+    key = ticket.get("ticket_id")
+    title = f"*Case summary{' so far' if so_far else ''} · {key}*"
+    source = (f"from {public} public comment{'s' if public != 1 else ''}"
+              + (f" ({internal} internal notes not included)" if internal else ""))
+    body = summary if summary else "Summary unavailable right now, see Jira for the comments."
+    text = f"{title} · {source}\n{body}"
+    if ticket.get("url"):
+        text += f"\n<{ticket['url']}|Open in Jira>"
+    return text
 
 
 def format_event(event: Dict[str, Any]) -> str:

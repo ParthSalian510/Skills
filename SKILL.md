@@ -25,6 +25,7 @@ What each file is for, and whether it runs for real:
 | `scripts/run_log.py` | Run-log paths, the Step 6 CLI, and `lookup` for Step 3 | Yes |
 | `scripts/jira_poller.py` | Autonomous sync + `backfill`; systemd service `ctc-jira-poller` | Yes, test workspace |
 | `scripts/sync_engine.py` | Shared create/sync/archive/backfill logic and `state/channels.json` | Yes, test workspace |
+| `scripts/summarizer.py` | Comment → summary via `claude -p` (no names, scrubbed, tools off) | Yes, CASE-3997 only |
 | `scripts/webhook_server.py` | Slack client, starter formatter, Jira-webhook receiver (queue + worker) | Client/formatter yes; webhook receiver built and tested but not connected (no Jira-side webhook) |
 | `scripts/ticket_sync.py` | Topic/emoji formatting (used by the sync engine); `TicketSyncManager` only *plans* actions | Formatting yes; manager no |
 | `scripts/audit_logger.py` | Writes one run record per run | Yes |
@@ -903,6 +904,29 @@ each ticket returned:
   archive the channel when status is in `archive_on_status`.
 - **Anything else** (older untracked tickets, archived channels): ignored.
 
+**Comment summaries** (`scripts/summarizer.py`, config `tier_2.sync.summaries`):
+for opted-in tickets (`tickets: [CASE-3997]`, or `"*"` for all), new public
+comments become one short *Update* note of 1–3 bullets written by Claude.
+It never copies the comment text. The team uses these channels as a memory
+map of each case, so the notes say what was found, what was done and what's
+next.
+- No names, greetings, signatures, phone numbers, e-mail addresses, links or
+  meeting details. Authors reach the model only as "Customer" or "Support",
+  and contact and meeting details are scrubbed before and after the model runs.
+- Scheduling-only comments ("please join the call") produce no post.
+- If Claude can't be reached, the note says "Summary unavailable, see Jira"
+  rather than copying the comments.
+- The first time a ticket is seen, only the comment cursor is recorded, so
+  old history is never dumped into a channel.
+- It runs the Claude Code CLI (`claude -p`) under this machine's login. No
+  API key is needed. Tools, MCP servers, settings and skills are all off,
+  and it runs from an empty directory.
+
+```bash
+python3 scripts/jira_poller.py summarize CASE-3997 --dry-run   # preview a case summary so far
+python3 scripts/jira_poller.py summarize CASE-3997             # post it and start updates from here
+```
+
 **Backfill** (`jira_poller.py backfill KEY [--dry-run]`) creates the channel
 for a ticket that's already in progress or closed, then replays its history.
 The starter message shows the ticket as the team first saw it: changes made
@@ -911,6 +935,9 @@ creation (`OPENING_SETTLE_SECONDS` in `sync_engine.py`) count as part of the
 opening state and are left out of the history. On CASE-4009, Automation
 changed P1 → P3 three seconds in, so the ticket opened at P3. Later
 Automation changes, and anything a person does, stay in the history.
+With summaries on, the history is one *Case summary* message (Problem /
+Findings / Steps / Status), with only the status, priority and assignee
+changes threaded under it. Comments are not replayed one by one.
 
 Every Slack and Jira call has a timeout (15–20 s) and at most 3 attempts
 (`request_with_retry` in `webhook_server.py`). Rate limits (429) are retried

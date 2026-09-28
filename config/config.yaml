@@ -210,6 +210,17 @@ tier_2:
     sync_assignee: true     # Show who it's assigned to
 
     # Archive behavior: close channels automatically when ticket is resolved
+    # Comment summaries (scripts/summarizer.py): new public comments become a
+    # short "Update" note written by Claude, never a copy. Runs the Claude
+    # Code CLI (`claude -p`) under this machine's login, with tools, MCP,
+    # settings and skills disabled. No names, contact or meeting details.
+    summaries:
+      enabled: true
+      tickets: [CASE-3997]      # tracked tickets to summarise; "*" = all
+      model: claude-opus-5-5
+      timeout_seconds: 180
+      # claude_path: /home/<user>/.local/bin/claude   # default: found on PATH
+
     archive_on_status:
       - "Done"
       - "Resolved"

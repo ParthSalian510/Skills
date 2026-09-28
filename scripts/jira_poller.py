@@ -17,6 +17,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audit_logger import AuditLogger
 from sync_engine import ChannelState, SyncEngine, default_state_path, utcnow
+from summarizer import from_config as summarizer_from_config
 from webhook_server import SlackMessenger, request_with_retry
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
@@ -78,9 +79,11 @@ class JiraClient:
 
 class Poller:
     def __init__(self, jira, messenger, state: ChannelState, projects: List[str], lookback_minutes: int,
-                 archive_statuses: List[str], invite_user_ids=()):
+                 archive_statuses: List[str], invite_user_ids=(), summarizer=None, summary_tickets=()):
         self.jira, self.state = jira, state
-        self.engine = SyncEngine(messenger, state, archive_statuses, invite_user_ids)
+        self.engine = SyncEngine(messenger, state, archive_statuses, invite_user_ids, summarizer=summarizer,
+                                 fetch_comments=jira.get_comments if summarizer else None,
+                                 summary_tickets=summary_tickets)
         self.projects, self.lookback_minutes = projects, lookback_minutes
         self.failing = False
 
@@ -155,6 +158,8 @@ def build_poller(state_path: Path) -> "Poller":
         lookback_minutes=int(cfg.get("polling_lookback_minutes", 2)),
         archive_statuses=cfg.get("archive_on_status", []),
         invite_user_ids=invite,
+        summarizer=summarizer_from_config(cfg),
+        summary_tickets=(cfg.get("summaries") or {}).get("tickets") or [],
     )
 
 
@@ -173,6 +178,9 @@ def main(argv=None) -> int:
     bf = sub.add_parser("backfill", help="create the channel for an existing ticket and replay its whole history")
     bf.add_argument("ticket_id")
     bf.add_argument("--dry-run", action="store_true", help="print what would be posted; no Slack calls")
+    sm = sub.add_parser("summarize", help="post a case summary so far into a tracked ticket's channel")
+    sm.add_argument("ticket_id")
+    sm.add_argument("--dry-run", action="store_true", help="print the summary; no Slack calls")
     args = p.parse_args(argv)
     state_path = Path(args.state)
 
@@ -197,6 +205,14 @@ def main(argv=None) -> int:
                                         dry_run=args.dry_run)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["outcome"] in ("dry_run", "backfilled") else 1
+    if args.cmd == "summarize":
+        if not poller.engine.summarizer:
+            raise SystemExit("Summaries are off: set tier_2.sync.summaries.enabled in config/config.yaml")
+        key = args.ticket_id.upper()
+        result = poller.engine.summarize_so_far(poller.jira.get_issue(key, JIRA_FIELDS), poller.jira.get_comments(key),
+                                                dry_run=args.dry_run)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0 if result["outcome"] in ("dry_run", "posted") else 1
     if args.cmd == "once":
         print(json.dumps(poller.poll_once()))
         return 0
