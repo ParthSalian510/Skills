@@ -207,6 +207,7 @@ tier_2:
     archive_on_status:
       - "Done"
       - "Resolved"
+      - "Completed"
       - "Closed"
 
     # Status-specific actions

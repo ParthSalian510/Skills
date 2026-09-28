@@ -71,6 +71,13 @@ class StateChangeDetector:
     def format_status_emoji(status: str) -> str:
         """Get emoji for ticket status."""
         emoji_map = {
+            # CASE project workflow
+            "Pending": "⏳",
+            "Under review": "🟡",
+            "Under investigation": "🔵",
+            "SAAS ESCL": "🔴",
+            "Completed": "🟢",
+            # Generic workflows
             "Open": "🟠",
             "In Progress": "🔵",
             "In Review": "🟡",

@@ -1,0 +1,18 @@
+# systemd user unit for the create-ticket-channel Jira poller.
+# Install: deploy/install-poller.sh   Logs: journalctl --user -u ctc-jira-poller -f
+[Unit]
+Description=create-ticket-channel Jira-to-Slack poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.claude/skills/create-ticket-channel
+EnvironmentFile=%h/.config/create-ticket-channel/env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 scripts/jira_poller.py run
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

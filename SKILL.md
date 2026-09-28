@@ -822,10 +822,27 @@ State (ticket → channel ID, last-seen fields, last poll time) lives in
 `state/channels.json`; after downtime the lookback widens to cover the gap.
 Each action writes a record to `logs/poller.jsonl`.
 
+**Always-on service.** The poller runs as the systemd user service
+`ctc-jira-poller` (unit in `deploy/`). It restarts on failure and starts at
+boot (lingering is on). Credentials come from
+`~/.config/create-ticket-channel/env` (mode 600, never in the repo). The Jira
+webhook route (`webhook_server.py` + ngrok) isn't used: no Jira-side webhook
+is available, so the poller is the sync path.
+
 ```bash
-export JIRA_EMAIL=... JIRA_API_TOKEN=... SLACK_BOT_TOKEN=xoxb-... SLACK_INVITE_USER_IDS=U0C2LN775NX
+deploy/install-poller.sh                              # install / reinstall + start
+systemctl --user status ctc-jira-poller               # is it running?
+journalctl --user -u ctc-jira-poller -f               # live logs
+systemctl --user restart ctc-jira-poller              # after config/code changes
+systemctl --user stop ctc-jira-poller                 # pause syncing
+```
+
+Manual use (stop the service first so two pollers don't run at once):
+
+```bash
+set -a; . ~/.config/create-ticket-channel/env; set +a
 python3 scripts/jira_poller.py once      # single poll, prints counts
-python3 scripts/jira_poller.py run       # poll forever
+python3 scripts/jira_poller.py run       # poll forever (foreground)
 python3 scripts/jira_poller.py track CASE-3997 C0C4JS4P77E case-3997-isoc-med   # sync an existing channel
 python3 scripts/jira_poller.py status    # show tracked tickets
 ```
