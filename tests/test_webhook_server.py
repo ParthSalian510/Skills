@@ -11,6 +11,7 @@ import sys
 import os
 os.environ.setdefault("CTC_RUN_MODE", "test")
 import json
+import time
 import hmac
 import hashlib
 from pathlib import Path
@@ -147,9 +148,10 @@ try:
 
     check("Queue at max size", queue.size() == 3)
 
-    # Add to full queue - should drop oldest (deque with maxlen behavior)
-    queue.enqueue({"ticket_id": "SR-4003"})
+    # Full queue rejects the new task instead of silently dropping the oldest
+    check("Full queue rejects new task", queue.enqueue({"ticket_id": "SR-4003"}) is False)
     check("Queue still at max size after overflow", queue.size() == 3)
+    check("Oldest task kept", queue.dequeue()["ticket_id"] == "SR-4000")
 
 except Exception as e:
     failed += 1
@@ -557,6 +559,56 @@ r, calls, _ = run_retry([ws.requests.Timeout("t")])
 check("Timeout on a post is raised, not retried", isinstance(r, ws.requests.Timeout) and len(calls) == 1)
 r, calls, _ = run_retry([ws.requests.ConnectionError("c"), FakeResp(200)], idempotent=True)
 check("Connection error retried for idempotent calls", getattr(r, "status_code", None) == 200)
+
+
+# G5: the queue is drained by a worker; Jira is acknowledged before the Slack work runs.
+import threading as _threading
+def signed(secret, key):
+    body = json.dumps({"webhookEvent": "jira:issue_updated", "issue": {"key": key, "fields": {
+        "summary": "x", "status": {"name": "Open"}, "priority": {"name": "P3"},
+        "project": {"key": key.split("-")[0]}, "customfield_10002": [{"name": "ISOC"}]}}}).encode()
+    return body, "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+seen, gate = [], _threading.Event()
+def slow_callback(task):
+    gate.wait(5)
+    seen.append(task["ticket_id"])
+h = WebhookHandler(WebhookConfig(secret="s"), sync_callback=slow_callback)
+body, sig = signed("s", "CASE-5001")
+r = h.handle_webhook(body, sig)
+check("Webhook answers before sync work finishes", r["status"] == "queued" and seen == [], seen)
+gate.set()
+for _ in range(50):
+    if seen:
+        break
+    time.sleep(0.05)
+check("Background worker drains the queue", seen == ["CASE-5001"] and h.queue.size() == 0, seen)
+check("Processed counter increments", h.queue.stats()["processed"] == 1, h.queue.stats())
+
+flaky_calls = []
+def flaky(task):
+    flaky_calls.append(task["attempts"])
+    if task["attempts"] == 1:
+        raise RuntimeError("Slack hiccup")
+h2 = WebhookHandler(WebhookConfig(secret="s"), sync_callback=flaky)
+h2.queue.enqueue({"ticket_id": "CASE-5002"})
+h2.drain()
+check("Failed task retried once, then succeeds", flaky_calls == [1, 2] and h2.queue.stats()["processed"] == 1,
+      (flaky_calls, h2.queue.stats()))
+def always_fail(task):
+    raise RuntimeError("down")
+h3 = WebhookHandler(WebhookConfig(secret="s"), sync_callback=always_fail)
+h3.queue.enqueue({"ticket_id": "CASE-5003"})
+check("Persistently failing task stops after 2 attempts", h3.drain() == 2 and h3.queue.stats()["failed"] == 1,
+      h3.queue.stats())
+
+app = ws.create_webhook_app(WebhookConfig(secret="s", max_queue_size=1))
+client = app.test_client()
+b1, s1 = signed("s", "CASE-5004")
+b2, s2 = signed("s", "CASE-5005")
+check("Accepted webhook returns 202", client.post("/webhooks/jira", data=b1, headers={"X-Hub-Signature": s1}).status_code == 202)
+check("Full queue returns 503 so Jira retries",
+      client.post("/webhooks/jira", data=b2, headers={"X-Hub-Signature": s2}).status_code == 503)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

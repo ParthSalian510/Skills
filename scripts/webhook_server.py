@@ -29,6 +29,7 @@ import html
 import logging
 import os
 import re
+import threading
 import time
 from typing import Dict, Any, Optional, Callable, List, Tuple
 from dataclasses import dataclass
@@ -375,27 +376,36 @@ class WebhookValidator:
 
 
 class WebhookQueue:
-    """In-memory queue for sync tasks."""
+    """Thread-safe in-memory queue for sync tasks, drained by WebhookHandler's worker thread.
+
+    A full queue rejects new tasks (the webhook answers 503 so Jira retries)
+    instead of silently dropping the oldest one. Tasks still queued when the
+    process stops are lost; the poller picks those changes up on its next run.
+    """
 
     def __init__(self, max_size: int = 100):
-        self.queue = deque(maxlen=max_size)
+        self.queue: deque = deque()
+        self.max_size = max_size
         self.processed = 0
         self.failed = 0
+        self.retried = 0
+        self._cond = threading.Condition()
 
     def enqueue(self, task: Dict[str, Any]) -> bool:
         """Add task to queue. Returns False if queue full."""
-        try:
+        with self._cond:
+            if len(self.queue) >= self.max_size:
+                return False
             self.queue.append(task)
+            self._cond.notify()
             return True
-        except Exception:
-            return False
 
-    def dequeue(self) -> Optional[Dict[str, Any]]:
-        """Remove and return next task from queue."""
-        try:
-            return self.queue.popleft()
-        except IndexError:
-            return None
+    def dequeue(self, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """Remove and return the next task; with a timeout, wait up to that long for one."""
+        with self._cond:
+            if not self.queue and timeout:
+                self._cond.wait(timeout)
+            return self.queue.popleft() if self.queue else None
 
     def size(self) -> int:
         """Get current queue size."""
@@ -407,6 +417,7 @@ class WebhookQueue:
             "queue_size": self.size(),
             "processed": self.processed,
             "failed": self.failed,
+            "retried": self.retried,
         }
 
 
@@ -419,6 +430,55 @@ class WebhookHandler:
         self.validator = WebhookValidator()
         self.sync_callback = sync_callback
         self.event_log: deque = deque(maxlen=100)
+        self._worker: Optional[threading.Thread] = None
+        self._worker_lock = threading.Lock()
+
+    MAX_TASK_ATTEMPTS = 2
+
+    def process_next(self, timeout: Optional[float] = None) -> bool:
+        """Run the sync callback for one queued task. Returns False if there was nothing to do.
+
+        A task whose callback raises is re-queued once; after that it counts as failed.
+        Re-running is safe: the sync engine compares against saved state, so a
+        change that already went through is simply "unchanged" the second time.
+        """
+        task = self.queue.dequeue(timeout)
+        if task is None:
+            return False
+        task["attempts"] = task.get("attempts", 0) + 1
+        try:
+            self.sync_callback(task)
+            task["status"] = "done"
+            self.queue.processed += 1
+        except Exception as e:
+            logger.error(f"Sync failed for {task['ticket_id']} (attempt {task['attempts']}): {e}")
+            if task["attempts"] < self.MAX_TASK_ATTEMPTS and self.queue.enqueue(task):
+                self.queue.retried += 1
+            else:
+                task["status"] = "failed"
+                self.queue.failed += 1
+        return True
+
+    def drain(self) -> int:
+        """Process every queued task now (tests and one-off runs). Returns how many ran."""
+        count = 0
+        while self.process_next():
+            count += 1
+        return count
+
+    def _run_worker(self) -> None:
+        while True:
+            try:
+                self.process_next(timeout=5)
+            except Exception as e:  # never let the worker die
+                logger.error(f"Queue worker error: {e}")
+
+    def ensure_worker(self) -> None:
+        """Start the background worker (once per process, lazily, so it works under gunicorn's forking)."""
+        with self._worker_lock:
+            if self._worker is None or not self._worker.is_alive():
+                self._worker = threading.Thread(target=self._run_worker, name="webhook-queue-worker", daemon=True)
+                self._worker.start()
 
     def authenticated(self, payload: bytes, signature: str, token: str = "") -> bool:
         """Jira system webhooks sign the body (X-Hub-Signature); Automation rules can only send a static header."""
@@ -482,13 +542,9 @@ class WebhookHandler:
 
             logger.info(f"Task queued for {task['ticket_id']}")
 
-            # If sync callback provided, call it (async processing)
+            # Acknowledge Jira now; the worker thread does the Slack work.
             if self.sync_callback:
-                try:
-                    self.sync_callback(task)
-                except Exception as e:
-                    logger.error(f"Error in sync callback: {e}")
-                    # Don't fail the webhook response
+                self.ensure_worker()
 
             # Log event
             self.event_log.append({
@@ -652,9 +708,10 @@ def create_webhook_app(config: WebhookConfig, sync_callback: Optional[Callable] 
 
         # Return appropriate status code
         if result["status"] == "queued":
-            return jsonify(result), 200
-        else:
-            return jsonify(result), 400
+            return jsonify(result), 202
+        if result.get("code") == "queue_full":
+            return jsonify(result), 503  # Jira retries failed deliveries
+        return jsonify(result), 400
 
     def local_only():
         # Requests arriving through ngrok (or any proxy) carry X-Forwarded-For; keep internals off the internet.
@@ -674,7 +731,7 @@ def create_webhook_app(config: WebhookConfig, sync_callback: Optional[Callable] 
 
     @app.route("/webhooks/queue", methods=["GET"])
     def get_queue():
-        """Get queue status and next task (for testing)."""
+        """Get queue status (local only)."""
         if not local_only():
             return jsonify({"status": "error", "message": "Not found"}), 404
         return jsonify({
