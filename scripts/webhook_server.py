@@ -72,6 +72,38 @@ class WebhookConfig:
     slack_invite_user_ids: tuple = ()
 
 
+RETRY_STATUSES = {429, 502, 503, 504}
+MAX_ATTEMPTS = 3
+MAX_RETRY_WAIT_SECONDS = 30
+
+
+def request_with_retry(method: str, url: str, idempotent: bool = False, sleep=time.sleep, **kwargs):
+    """HTTP call with a timeout and at most MAX_ATTEMPTS tries.
+
+    Rate limits (429) are always retried after Retry-After, because the server
+    did not act on the request. 5xx and connection errors are retried only for
+    idempotent calls: retrying a timed-out chat.postMessage could post twice.
+    """
+    kwargs.setdefault("timeout", 15)
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = requests.request(method, url, **kwargs)
+        except (requests.ConnectionError, requests.Timeout):
+            if not idempotent or attempt == MAX_ATTEMPTS:
+                raise
+            sleep(min(2 ** attempt, MAX_RETRY_WAIT_SECONDS))
+            continue
+        retryable = response.status_code == 429 or (idempotent and response.status_code in RETRY_STATUSES)
+        if not retryable or attempt == MAX_ATTEMPTS:
+            return response
+        wait = response.headers.get("Retry-After")
+        wait = float(wait) if wait and wait.replace(".", "", 1).isdigit() else 2 ** attempt
+        logger.warning(f"{response.status_code} from {url.split('?')[0]}; retrying in {min(wait, MAX_RETRY_WAIT_SECONDS):.0f}s "
+                       f"(attempt {attempt}/{MAX_ATTEMPTS})")
+        sleep(min(wait, MAX_RETRY_WAIT_SECONDS))
+    return response
+
+
 class SlackMessenger:
     """Sends messages to Slack channels."""
 
@@ -83,33 +115,19 @@ class SlackMessenger:
 
     def create_channel(self, channel_name: str) -> Dict[str, Any]:
         """Create a Slack channel."""
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        }
-        data = {
-            "name": channel_name.lower().replace(" ", "-")[:80],
-            "is_private": False,
-        }
+        data = {"name": channel_name.lower().replace(" ", "-")[:80], "is_private": False}
         try:
-            response = requests.post(
-                f"{self.base_url}/conversations.create",
-                headers=headers,
-                json=data,
-            )
-            response.raise_for_status()
-            result = response.json()
-            if result.get("ok"):
-                return {"success": True, "channel_id": result["channel"]["id"]}
-            else:
-                error = result.get("error", "Unknown error")
-                if error == "name_taken":
-                    return {"success": True, "channel_id": None, "exists": True}
-                logger.error(f"Failed to create channel: {error}")
-                return {"success": False, "error": error}
+            result = self._call("conversations.create", data)
         except Exception as e:
             logger.error(f"Error creating channel: {e}")
             return {"success": False, "error": str(e)}
+        if result.get("ok"):
+            return {"success": True, "channel_id": result["channel"]["id"]}
+        error = result.get("error", "Unknown error")
+        if error == "name_taken":
+            return {"success": True, "channel_id": None, "exists": True}
+        logger.error(f"Failed to create channel: {error}")
+        return {"success": False, "error": error}
 
     def send_message(self, channel_id: str, text: str, blocks: Optional[list] = None) -> bool:
         """Send a message to a Slack channel."""
@@ -128,11 +146,10 @@ class SlackMessenger:
         return False
 
     def _post(self, method: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        response = requests.post(
-            f"{self.base_url}/{method}",
+        response = request_with_retry(
+            "POST", f"{self.base_url}/{method}",
             headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
             json=data,
-            timeout=15,
         )
         response.raise_for_status()
         return response.json()

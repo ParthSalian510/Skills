@@ -17,7 +17,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audit_logger import AuditLogger
 from sync_engine import ChannelState, SyncEngine, default_state_path, utcnow
-from webhook_server import SlackMessenger
+from webhook_server import SlackMessenger, request_with_retry
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = SKILL_ROOT / "config" / "config.yaml"
@@ -39,8 +39,8 @@ class JiraClient:
             body = {"jql": jql, "fields": fields, "maxResults": 100}
             if page_token:
                 body["nextPageToken"] = page_token
-            response = requests.post(f"{self.base_url}/rest/api/3/search/jql", json=body, auth=self.auth,
-                                     headers={"Accept": "application/json"}, timeout=20)
+            response = request_with_retry("POST", f"{self.base_url}/rest/api/3/search/jql", idempotent=True,
+                                          json=body, auth=self.auth, headers={"Accept": "application/json"}, timeout=20)
             response.raise_for_status()
             data = response.json()
             issues.extend(data.get("issues", []))
@@ -49,8 +49,8 @@ class JiraClient:
                 return issues
 
     def _get(self, path: str, **params) -> Dict[str, Any]:
-        response = requests.get(f"{self.base_url}/rest/api/3/{path}", params=params, auth=self.auth,
-                                headers={"Accept": "application/json"}, timeout=20)
+        response = request_with_retry("GET", f"{self.base_url}/rest/api/3/{path}", idempotent=True, params=params,
+                                      auth=self.auth, headers={"Accept": "application/json"}, timeout=20)
         response.raise_for_status()
         return response.json()
 

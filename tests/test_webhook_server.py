@@ -520,5 +520,43 @@ check("Failed rejoin reports failure without retry loop", m.set_topic("C1", "t")
 m = ScriptedMessenger([{"ok": False, "error": "channel_not_found"}])
 check("Other errors are not retried", m.archive_channel("C1") is False and m.sent == ["conversations.archive"], m.sent)
 
+
+# Timeouts and capped retries (G11).
+class FakeResp:
+    def __init__(self, status, retry_after=None):
+        self.status_code, self.headers = status, ({"Retry-After": retry_after} if retry_after else {})
+
+def run_retry(responses, idempotent=False):
+    calls, waits, original = [], [], ws.requests.request
+    def fake(method, url, **kw):
+        calls.append(kw.get("timeout"))
+        r = responses.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+    ws.requests.request = fake
+    try:
+        result = ws.request_with_retry("POST", "https://x/api", idempotent=idempotent, sleep=waits.append)
+    except Exception as e:
+        result = e
+    finally:
+        ws.requests.request = original
+    return result, calls, waits
+
+r, calls, waits = run_retry([FakeResp(429, "2"), FakeResp(200)])
+check("429 retried after Retry-After", r.status_code == 200 and waits == [2.0], waits)
+check("Every attempt has a timeout", calls and all(t == 15 for t in calls), calls)
+r, calls, waits = run_retry([FakeResp(429, "900")] * 3)
+check("Retries capped at 3 attempts", len(calls) == 3 and r.status_code == 429, len(calls))
+check("Retry wait capped at 30s", max(waits) == 30, waits)
+r, calls, _ = run_retry([FakeResp(503), FakeResp(200)])
+check("5xx not retried for non-idempotent calls (no double post)", r.status_code == 503 and len(calls) == 1)
+r, calls, _ = run_retry([FakeResp(503), FakeResp(200)], idempotent=True)
+check("5xx retried for idempotent calls", r.status_code == 200 and len(calls) == 2)
+r, calls, _ = run_retry([ws.requests.Timeout("t")])
+check("Timeout on a post is raised, not retried", isinstance(r, ws.requests.Timeout) and len(calls) == 1)
+r, calls, _ = run_retry([ws.requests.ConnectionError("c"), FakeResp(200)], idempotent=True)
+check("Connection error retried for idempotent calls", getattr(r, "status_code", None) == 200)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -43,6 +43,25 @@ Do NOT use for tickets that aren't customer tickets, or when the user wants an e
 
 **Status:** Implemented and verified. All three checks must pass before proceeding to Step 1.
 
+**Run the independent calls in parallel, then decide in order.** Issue these
+five calls together in a single message (none depends on another):
+
+| Call | Serves |
+|---|---|
+| chrome-bridge `get_status()` | Check 1 |
+| `getJiraIssue(SR-1, fields: ["key"])` | Check 2 |
+| `slack_search_channels(query: "test", …, limit: 1)` | Check 3 |
+| `getJiraIssue(<ticket>, fields: [Step 1 fields])` | Step 1 fetch |
+| `slack_search_channels(query: <ticket_id>, …, include_archived: true)` | Step 3 duplicate search |
+
+Parallel is only about *when the calls are made*, not about skipping gates.
+Nothing irreversible happens until every result is in and has passed, in
+this order: Check 1 → Check 2 → Check 3 → ticket found (Step 1) → name
+generated (Step 2) → no existing channel (Step 3). Report the **first**
+failure in that order and stop, even if later results came back fine. If a
+pre-flight check fails, ignore the Step 1/3 results (they can't be
+trusted). The browser (Step 4) is touched only after all of this passes.
+
 Before attempting any channel creation, verify all dependencies are available and responding:
 
 **Check 1: chrome-bridge connection**
@@ -124,7 +143,7 @@ Stop immediately. Do not proceed to Step 1.
 
 **Gotchas:**
 - Do NOT treat a timeout (>10s) as a connectivity check pass — a timeout means the service is unreachable or overloaded. Treat as a failure.
-- Do NOT check arbitrary tickets (e.g., "does the requested ticket exist?") in pre-flight — that's Step 1's job. Pre-flight is just "are the dependencies up?"
+- Do NOT fold the "does the requested ticket exist?" check into Check 2. The Step 1 fetch runs in the same parallel batch, but a missing ticket is reported as Step 1's "Ticket not found", not as "Jira is down". Pre-flight is just "are the dependencies up?"
 
 ### Step 1 — Fetch metadata (Atlassian MCP, no browser)
 
@@ -817,6 +836,13 @@ each ticket returned:
   (status/priority), post a "Jira update" note with old → new values, and
   archive the channel when status is in `archive_on_status`.
 - **Anything else** (older untracked tickets, archived channels): ignored.
+
+Every Slack and Jira call has a timeout (15–20 s) and at most 3 attempts
+(`request_with_retry` in `webhook_server.py`). Rate limits (429) are retried
+after Slack's/Jira's `Retry-After` (capped at 30 s). Server errors and dropped
+connections are retried only for reads, never for posts, so a slow Slack
+can't cause a duplicate message. If the bot has been removed from a channel,
+it rejoins and retries once.
 
 State (ticket → channel ID, last-seen fields, last poll time) lives in
 `state/channels.json`; after downtime the lookback widens to cover the gap.
