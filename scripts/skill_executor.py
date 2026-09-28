@@ -30,6 +30,7 @@ from error_messages import error_message
 from audit_logger import AuditLogger, audit_preflight_checks, audit_jira_fetch, audit_slack_search
 from retry_logic import with_retry, classify_error, ErrorType
 from ticket_sync import TicketSyncManager
+from generate_channel_name import generate_channel_name, load_config as load_naming_config
 
 
 class SkillExecutor:
@@ -64,13 +65,15 @@ class SkillExecutor:
         self.priority = None
         self.channel_name = None
 
-        # Initialize audit logger
+        self.config_path = Path(config_path)
+        # Steps below still use placeholder data, so runs are logged as "placeholder", never "live".
         self.audit_logger = AuditLogger(
             self.ticket_id,
             self.ticket_type,
             "Unknown",  # Will be updated after Jira fetch
             "Unknown",  # Will be updated after Jira fetch
-            config_path.parent / self.config.get("audit_log_path", "audit.log.jsonl")
+            source="executor",
+            mode="dry_run" if dry_run else "placeholder",
         )
 
         # Initialize Tier 2 sync manager (optional)
@@ -228,8 +231,12 @@ class SkillExecutor:
         start = time.time()
 
         try:
-            # Placeholder: would call generate_channel_name.py script
-            channel_name = f"{self.ticket_id.lower()}-{metadata.get('customer', 'unknown').lower()}-{metadata.get('priority', 'unknown').lower().replace('p', '')}"
+            channel_name, errors = generate_channel_name(
+                self.ticket_id, self.ticket_type, metadata.get("customer"), metadata.get("priority"),
+                load_naming_config(str(self.config_path)),
+            )
+            if errors:
+                raise ValueError("; ".join(errors))
 
             duration = time.time() - start
             self.audit_logger.record_step(

@@ -4,6 +4,8 @@
 Run: python3 tests/test_generate_channel_name.py
 """
 import sys
+import os
+os.environ.setdefault("CTC_RUN_MODE", "test")
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))

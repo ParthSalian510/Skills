@@ -48,7 +48,7 @@ Expected output:
 Then examine the audit log:
 
 ```bash
-tail -1 ~/.claude/skills/create-ticket-channel/audit.log.jsonl | jq '.'
+tail -1 ~/.claude/skills/create-ticket-channel/logs/skill-runs.jsonl | jq '.'
 ```
 
 **Expected output format:**
@@ -95,15 +95,15 @@ Inspect the raw file:
 
 ```bash
 # Show last 3 entries
-tail -3 ~/.claude/skills/create-ticket-channel/audit.log.jsonl
+tail -3 ~/.claude/skills/create-ticket-channel/logs/skill-runs.jsonl
 
 # Count total entries
-wc -l ~/.claude/skills/create-ticket-channel/audit.log.jsonl
+wc -l ~/.claude/skills/create-ticket-channel/logs/skill-runs.jsonl
 
 # Validate all JSON
 python3 -c "
 import json
-with open('~/.claude/skills/create-ticket-channel/audit.log.jsonl') as f:
+with open('~/.claude/skills/create-ticket-channel/logs/skill-runs.jsonl') as f:
     for i, line in enumerate(f):
         try:
             json.loads(line)
@@ -124,7 +124,7 @@ python3 << 'EOF'
 import json
 from pathlib import Path
 
-log_file = Path.home() / ".claude" / "skills" / "create-ticket-channel" / "audit.log.jsonl"
+log_file = Path.home() / ".claude" / "skills" / "create-ticket-channel" / "logs" / "skill-runs.jsonl"
 step_times = {}
 
 with open(log_file) as f:
@@ -168,7 +168,7 @@ python3 << 'EOF'
 import json
 from pathlib import Path
 
-log_file = Path.home() / ".claude" / "skills" / "create-ticket-channel" / "audit.log.jsonl"
+log_file = Path.home() / ".claude" / "skills" / "create-ticket-channel" / "logs" / "skill-runs.jsonl"
 
 with open(log_file) as f:
     for line in reversed(list(f)):
@@ -205,7 +205,7 @@ python3 << 'EOF'
 import json
 from pathlib import Path
 
-log_file = Path.home() / ".claude" / "skills" / "create-ticket-channel" / "audit.log.jsonl"
+log_file = Path.home() / ".claude" / "skills" / "create-ticket-channel" / "logs" / "skill-runs.jsonl"
 
 with open(log_file) as f:
     for line in f:

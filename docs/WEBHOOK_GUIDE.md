@@ -102,19 +102,25 @@ sha256(webhook_secret + request_body)
 
 ### Quick Start
 
+The server **refuses to start** unless `JIRA_WEBHOOK_SECRET` is set (or
+`--secret` is passed) — there is no built-in default secret.
+
 ```bash
-# Start with default settings
-python3 scripts/webhook_server.py
+export JIRA_WEBHOOK_SECRET="<same secret as in the Jira webhook>"
+export SLACK_BOT_TOKEN="xoxb-..."            # optional: enables channel creation
+export SLACK_INVITE_USER_IDS="U0C2LN775NX"   # optional: comma-separated user IDs to invite
 
-# With custom secret
-python3 scripts/webhook_server.py --secret "your-secret-here"
+# Production: Gunicorn app factory
+cd scripts && gunicorn -w 4 -b 0.0.0.0:5000 'webhook_server:create_app_from_env()'
 
-# Custom port and debug mode
+# Development: Flask server (reads the same env vars)
 python3 scripts/webhook_server.py --port 8000 --debug
-
-# Custom host (for deployment)
-python3 scripts/webhook_server.py --host 0.0.0.0 --port 5000
 ```
+
+Channels are named with the team standard via `generate_channel_name.py`
+(e.g. `case-4009-isoc-low`). If the channel already exists, the server logs
+`Channel <name> already exists, avoiding channel duplication` and stops.
+Every event is recorded in `logs/webhook.jsonl` (see SKILL.md "Run Logs").
 
 ### Configuration
 

@@ -8,6 +8,8 @@ and performance impact.
 Run: python3 tests/test_audit_logger.py
 """
 import sys
+import os
+os.environ.setdefault("CTC_RUN_MODE", "test")
 import json
 import tempfile
 from pathlib import Path

@@ -59,7 +59,7 @@ Setup (one-time per machine):
 1. Open chrome://extensions in Chrome
 2. Enable "Developer mode" (toggle in top-right corner)
 3. Click "Load unpacked"
-4. Select the directory: ~/.claude/skills/create-ticket-channel/chrome-bridge/extension
+4. Select the directory: ~/Desktop/REP/Streamline/chrome-bridge/extension
 5. Restart Claude Code
 6. Try again
 
@@ -298,7 +298,7 @@ as diagnostic context, don't retry indefinitely or reload repeatedly.
   echoed back `Dedicated channel: 🔒sr-4058-aail-low`, and Slack MCP search
   independently confirmed `#sr-4058-aail-low` exists (private, correct
   topic/purpose, created by the acting user). This is the reference run for
-  the whole pipeline — see `audit.log.jsonl` for its logged entry.
+  the whole pipeline — see `logs/skill-runs.jsonl` for its logged entry.
 
 ### Step 5 — Verify (Slack MCP)
 
@@ -314,12 +314,32 @@ after creation, don't conclude failure** — retry once with
 acting user's own memberships directly, no search-index lag) before reporting
 a verification failure.
 
-### Step 6 — Audit log
+### Step 6 — Run log
 
-Append one JSON line to `audit_log_path` (from config) with exactly the shape
-shown in "Audit Log Shape" below. No credentials, tokens, cookies, or raw
-Jira/Slack payloads — ticket_id/type/customer/priority/channel_name plus
-outcome/timestamp/duration only.
+Write the run record with one Bash call — never append JSON by hand:
+
+```bash
+python3 scripts/run_log.py --source skill --mode live \
+  --ticket "$TICKET_ID" --type "$TICKET_TYPE" --customer "$CUSTOMER" --priority "$PRIORITY" \
+  --channel "$CHANNEL_NAME" --final success \
+  --steps '[{"step":0,"name":"Pre-flight checks","status":"success"},
+            {"step":3,"name":"Duplicate check","status":"success","details":{"found":false}},
+            {"step":4,"name":"Browser automation","status":"success"},
+            {"step":5,"name":"Verify in Slack","status":"success"}]'
+```
+
+- `--mode dry_run` for `--dry-run` runs; `--final` is `success`, `failure`,
+  `skipped` (channel already existed) or `dry_run`.
+- Include every step that ran, with `"status"` `success` / `failure` /
+  `timeout` / `skipped`, and an `"error": {"type", "message"}` on the step
+  that failed. Add `duration_seconds` only when actually measured — never
+  estimate it.
+- Write the record on failure paths too (before reporting the failure), so
+  every run leaves exactly one line.
+- No credentials, tokens, cookies, or raw Jira/Slack payloads.
+
+The script prints `{"run_id", "log"}`; the record goes to
+`logs/skill-runs.jsonl`. See "Run Logs" below for the shape.
 
 ### Step 7 — Starter message (optional, only if explicitly asked)
 
@@ -780,121 +800,85 @@ Reason:
 No duplicate channel was created.
 ```
 
-## Audit Log Shape (Tier 1, Priority 4)
+## Autonomous Sync (runs outside the chat flow)
 
-### Enhanced Format (Priority 4)
+`scripts/jira_poller.py` keeps channels in sync without anyone invoking this
+skill. It uses a Slack **bot token** (currently the test workspace
+"Claude Test Rep") and a Jira API token — not the MCP tools above.
 
-Each execution creates a detailed record with step-by-step timing:
+Every `polling_interval_seconds` (config `tier_2.sync`, default 60) it runs
+one JQL query, `project in (<polling_projects>) AND updated >= "-Nm"`, and for
+each ticket returned:
+
+- **New ticket** (created after the poller first started): create the
+  standard-named channel, invite `SLACK_INVITE_USER_IDS`, post the starter
+  message. If the channel already exists: log "avoiding channel duplication".
+- **Tracked ticket, status/priority/assignee changed:** set the channel topic
+  (status/priority), post a "Jira update" note with old → new values, and
+  archive the channel when status is in `archive_on_status`.
+- **Anything else** (older untracked tickets, archived channels): ignored.
+
+State (ticket → channel ID, last-seen fields, last poll time) lives in
+`state/channels.json`; after downtime the lookback widens to cover the gap.
+Each action writes a record to `logs/poller.jsonl`.
+
+```bash
+export JIRA_EMAIL=... JIRA_API_TOKEN=... SLACK_BOT_TOKEN=xoxb-... SLACK_INVITE_USER_IDS=U0C2LN775NX
+python3 scripts/jira_poller.py once      # single poll, prints counts
+python3 scripts/jira_poller.py run       # poll forever
+python3 scripts/jira_poller.py track CASE-3997 C0C4JS4P77E case-3997-isoc-med   # sync an existing channel
+python3 scripts/jira_poller.py status    # show tracked tickets
+```
+
+## Run Logs
+
+Every component writes **one JSON line per run** to its own file in `logs/`
+(`scripts/run_log.py` owns the paths; `CTC_LOG_DIR` overrides the directory):
+
+| File | Written by | `mode` values |
+|---|---|---|
+| `logs/skill-runs.jsonl` | this skill, Step 6 (`scripts/run_log.py` CLI) | `live`, `dry_run` |
+| `logs/webhook.jsonl` | `scripts/webhook_server.py`, one record per event (incl. rejected signatures) | `live` |
+| `logs/poller.jsonl` | `scripts/jira_poller.py`, one record per channel created/synced, plus Jira outages | `live` |
+| `logs/executor.jsonl` | `scripts/skill_executor.py` — placeholder data only, never a real run | `placeholder`, `dry_run` |
+| `logs/tests.jsonl` | `tests/run_all.py` and anything run with `CTC_RUN_MODE=test` | `test` |
+
+`CTC_RUN_MODE=test` routes every source to `tests.jsonl`, so test and
+simulated runs never mix with real ones. All test scripts set it.
+
+Record shape (same for every source):
 
 ```json
 {
-  "run_id": "20260923-154817-abc123",
-  "ticket_id": "CASE-4009",
+  "run_id": "20260925-152512-1a2b3c4d",
+  "source": "skill",
+  "mode": "live",
+  "ticket_id": "CASE-4010",
   "ticket_type": "CASE",
   "customer": "ISOC",
   "priority": "P3",
-  "channel_name": "case-4009-isoc-low",
-  "timestamp": "2026-09-23T15:22:34Z",
-  "duration_seconds": 45.2,
-  
+  "channel_name": "case-4010-isoc-low",
+  "timestamp": "2026-09-25T09:55:12.345678Z",
+  "duration_seconds": 41.5,
   "steps": [
-    {
-      "step": 0,
-      "name": "Pre-flight Checks",
-      "status": "success",
-      "duration_seconds": 2.1,
-      "details": {
-        "checks": {
-          "chrome_bridge": "connected",
-          "jira_api": "ok",
-          "slack_api": "ok"
-        }
-      }
-    },
-    {
-      "step": 4,
-      "name": "Browser automation",
-      "status": "success",
-      "duration_seconds": 28.0,
-      "actions": [
-        {
-          "action": "navigate",
-          "url": "https://bloo-systems.atlassian.net/browse/CASE-4009",
-          "duration_seconds": 8.0,
-          "status": "success"
-        },
-        {
-          "action": "find_trigger_button",
-          "selector": "[data-testid=...]",
-          "found": true,
-          "duration_seconds": 2.0,
-          "status": "success"
-        },
-        {
-          "action": "click_trigger",
-          "duration_seconds": 1.0,
-          "status": "success"
-        }
-      ]
-    }
+    {"step": 0, "name": "Pre-flight checks", "status": "success", "duration_seconds": 2.1},
+    {"step": 4, "name": "Browser automation", "status": "failure",
+     "error": {"type": "element_not_found", "message": "create button not found after 3 tries"}}
   ],
-  
-  "summary": {
-    "total_steps": 8,
-    "steps_succeeded": 8,
-    "steps_failed": 0,
-    "steps_timeout": 0,
-    "final_status": "success"
-  }
+  "summary": {"total_steps": 2, "steps_succeeded": 1, "steps_failed": 1, "steps_timeout": 0,
+              "final_status": "failure"}
 }
 ```
 
-### Step Records
+- `status` per step: `success` | `failure` | `timeout` | `skipped`.
+- `final_status`: `success` | `failure` | `skipped` (channel already existed)
+  | `dry_run` | `rejected` (webhook signature mismatch).
+- `duration_seconds` is omitted when it wasn't measured.
 
-Each step includes:
-- `step` — Step number (0-7)
-- `name` — Human-readable name
-- `status` — success | failure | timeout | skipped
-- `duration_seconds` — How long the step took
-- `details` — Step-specific data (varies by step)
-- `error` (if failed) — Error type, message, code
-- `actions` (for Step 4) — Browser automation sub-actions with timing
-
-### Run ID
-
-Format: `YYYYMMDD-HHMMSS-{random_suffix}`
-
-Unique identifier for each execution. Useful for:
-- Tracing logs from multi-step operations
-- Correlating with external system logs
-- Debugging timing issues
-
-### Benefits
-
-**For debugging:** Timing data shows which step is slow; action sequence shows exactly what browser did  
-**For monitoring:** Track success rates ("browser automation fails 2% of the time"); identify trends  
-**For audit:** Full trace of what happened; timestamp, ticket, channel, and user context  
-
-### Backward Compatibility
-
-Old format (single summary) is still valid. New format (with steps) is enhanced version.
-
-Old format example:
-```json
-{
-  "ticket_id": "SR-4058",
-  "ticket_type": "SR",
-  "customer": "CanFin",
-  "priority": "P3",
-  "channel_name": "sr-4058-canfin-low",
-  "jira_channel_action": "created",
-  "slack_verification": "success",
-  "timestamp": "2026-08-27T16:00:00Z",
-  "duration_seconds": 12
-}
-```
-
-Both formats can coexist in the same `audit.log.jsonl` file.
+Records migrated from the old files keep their original fields plus
+`source`, `mode` and `legacy_format` (`flat-v1` for the six live runs from
+the former `audit.log.jsonl`; `executor-v1`, mode `placeholder`, for the
+executor's former `config/~/…/audit.log.jsonl`).
 
 ## Step 4: How It Was Unblocked (Public Browser → chrome-bridge)
 
@@ -946,8 +930,8 @@ report per "chrome-bridge unreachable" in the Error Handling table above,
 same as the original constraint intended.
 
 **Setup required on any new machine:** chrome-bridge needs one manual,
-one-time step per machine — load `chrome-bridge/extension` as an unpacked
-extension via `chrome://extensions` → Developer mode → Load unpacked, then
-restart Claude Code. `get_status` reports `connected: false` until that's
-done. The MCP server itself is registered automatically by
-`chrome-bridge/install.sh`.
+one-time step per machine — load `~/Desktop/REP/Streamline/chrome-bridge/extension`
+as an unpacked extension via `chrome://extensions` → Developer mode → Load
+unpacked, then restart Claude Code. `get_status` reports `connected: false`
+until that's done. The MCP server itself is registered automatically by
+`~/Desktop/REP/Streamline/chrome-bridge/install.sh`.

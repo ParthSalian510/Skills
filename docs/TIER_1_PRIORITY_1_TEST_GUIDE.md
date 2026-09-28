@@ -74,7 +74,7 @@ Setup (one-time per machine):
 1. Open chrome://extensions in Chrome
 2. Enable "Developer mode" (toggle in top-right corner)
 3. Click "Load unpacked"
-4. Select the directory: ~/.claude/skills/create-ticket-channel/chrome-bridge/extension
+4. Select the directory: ~/Desktop/REP/Streamline/chrome-bridge/extension
 5. Restart Claude Code
 6. Try again
 

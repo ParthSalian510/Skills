@@ -8,6 +8,8 @@ slow API calls and showing the timeout error messages.
 Run: python3 tests/test_timeout_demo.py
 """
 import sys
+import os
+os.environ.setdefault("CTC_RUN_MODE", "test")
 import time
 from pathlib import Path
 

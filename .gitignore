@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+# runtime state of the local poller/webhook (ticket -> channel map, lock file)
+state/
+# rewritten on every test run
+logs/tests.jsonl

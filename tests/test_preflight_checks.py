@@ -8,6 +8,8 @@ Integration tests (actual API calls) are done manually against live Jira/Slack.
 Run: python3 tests/test_preflight_checks.py
 """
 import sys
+import os
+os.environ.setdefault("CTC_RUN_MODE", "test")
 from pathlib import Path
 
 # Expected error messages
@@ -19,7 +21,7 @@ Setup (one-time per machine):
 1. Open chrome://extensions in Chrome
 2. Enable "Developer mode" (toggle in top-right corner)
 3. Click "Load unpacked"
-4. Select the directory: ~/.claude/skills/create-ticket-channel/chrome-bridge/extension
+4. Select the directory: ~/Desktop/REP/Streamline/chrome-bridge/extension
 5. Restart Claude Code
 6. Try again"""
 

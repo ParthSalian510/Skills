@@ -15,8 +15,11 @@ Usage:
     app = create_webhook_app(config)
     app.run(port=5000)
 
-Or run directly:
+Or run directly (JIRA_WEBHOOK_SECRET must be set, or pass --secret):
     python3 webhook_server.py --port 5000 --debug
+
+Production (Gunicorn app factory):
+    gunicorn -w 4 -b 0.0.0.0:5000 'webhook_server:create_app_from_env()'
 """
 
 import json
@@ -26,12 +29,16 @@ import html
 import logging
 import os
 import re
-from typing import Dict, Any, Optional, Callable, List
+import time
+from typing import Dict, Any, Optional, Callable, List, Tuple
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 import asyncio
 from collections import deque
+
+from audit_logger import AuditLogger
+from generate_channel_name import generate_channel_name, load_config as load_naming_config
 
 try:
     from flask import Flask, request, jsonify
@@ -62,7 +69,6 @@ class WebhookConfig:
     host: str = "0.0.0.0"
     max_queue_size: int = 100
     slack_token: Optional[str] = None
-    slack_channel_prefix: str = "ticket"
     slack_invite_user_ids: tuple = ()
 
 
@@ -135,6 +141,52 @@ class SlackMessenger:
         except Exception as e:
             logger.error(f"Error sending message: {e}")
             return False
+
+    def _call(self, method: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        response = requests.post(
+            f"{self.base_url}/{method}",
+            headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
+            json=data,
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def post_message(self, channel_id: str, text: str, thread_ts: Optional[str] = None) -> Optional[str]:
+        """Post a message (optionally as a thread reply); returns its ts, or None on failure."""
+        data = {"channel": channel_id, "text": text, "unfurl_links": False}
+        if thread_ts:
+            data["thread_ts"] = thread_ts
+        try:
+            result = self._call("chat.postMessage", data)
+        except Exception as e:
+            logger.error(f"Error posting message: {e}")
+            return None
+        if not result.get("ok"):
+            logger.error(f"Failed to post message to {channel_id}: {result.get('error')}")
+            return None
+        return result.get("ts")
+
+    def set_topic(self, channel_id: str, topic: str) -> bool:
+        try:
+            result = self._call("conversations.setTopic", {"channel": channel_id, "topic": topic[:250]})
+        except Exception as e:
+            logger.error(f"Error setting topic: {e}")
+            return False
+        if not result.get("ok"):
+            logger.error(f"Failed to set topic on {channel_id}: {result.get('error')}")
+        return bool(result.get("ok"))
+
+    def archive_channel(self, channel_id: str) -> bool:
+        try:
+            result = self._call("conversations.archive", {"channel": channel_id})
+        except Exception as e:
+            logger.error(f"Error archiving channel: {e}")
+            return False
+        if result.get("ok") or result.get("error") == "already_archived":
+            return True
+        logger.error(f"Failed to archive {channel_id}: {result.get('error')}")
+        return False
 
     def invite_users(self, channel_id: str, user_ids: List[str]) -> bool:
         """Invite users to a channel."""
@@ -301,10 +353,11 @@ class WebhookValidator:
             return {
                 "ticket_id": ticket_id,
                 "status": (fields.get("status") or {}).get("name", "Unknown"),
-                "priority": (fields.get("priority") or {}).get("name", "P3"),
+                "priority": (fields.get("priority") or {}).get("name"),
                 "assignee": (fields.get("assignee") or {}).get("displayName", "Unassigned"),
                 "summary": (fields.get("summary") or "").strip(),
                 "organisation": ", ".join(organisations) or None,
+                "customer": organisations[0] if organisations else None,
                 "issue_type": (fields.get("issuetype") or {}).get("name"),
                 "project_key": (fields.get("project") or {}).get("key") or (ticket_id or "").split("-")[0],
                 "product_version": _option_value(fields.get(PRODUCT_VERSION_FIELD))
@@ -364,7 +417,13 @@ class WebhookHandler:
         self.sync_callback = sync_callback
         self.event_log: deque = deque(maxlen=100)
 
-    def handle_webhook(self, payload: bytes, signature: str) -> Dict[str, Any]:
+    def authenticated(self, payload: bytes, signature: str, token: str = "") -> bool:
+        """Jira system webhooks sign the body (X-Hub-Signature); Automation rules can only send a static header."""
+        if token and self.config.secret:
+            return hmac.compare_digest(token, self.config.secret)
+        return self.validator.validate_signature(payload, signature, self.config.secret)
+
+    def handle_webhook(self, payload: bytes, signature: str, token: str = "") -> Dict[str, Any]:
         """
         Handle incoming webhook event.
 
@@ -373,8 +432,12 @@ class WebhookHandler:
         """
         try:
             # Validate signature
-            if not self.validator.validate_signature(payload, signature, self.config.secret):
+            if not self.authenticated(payload, signature, token):
                 logger.warning("Invalid webhook signature")
+                run = AuditLogger("unknown", None, None, None, source="webhook")
+                run.record_step(0, "Validate signature", "failure", None,
+                                error={"type": "invalid_signature", "message": "X-Hub-Signature did not match"})
+                run.finalize(None, "rejected")
                 return {
                     "status": "error",
                     "message": "Invalid signature",
@@ -400,6 +463,7 @@ class WebhookHandler:
                 "ticket_id": ticket_data["ticket_id"],
                 "event_type": ticket_data["event_type"],
                 "ticket_data": ticket_data,
+                "issue": event["issue"],
                 "received_at": datetime.utcnow().isoformat() + "Z",
                 "status": "queued",
             }
@@ -461,63 +525,96 @@ class WebhookHandler:
         }
 
 
+NAMING_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+_naming_config: Optional[Dict[str, Any]] = None
+
+
+def channel_name_for(ticket_data: Dict[str, Any]) -> Tuple[Optional[str], List[str]]:
+    """Team-standard channel name (same rules as the skill), e.g. case-4009-isoc-low."""
+    global _naming_config
+    if _naming_config is None:
+        _naming_config = load_naming_config(str(NAMING_CONFIG_PATH))
+    return generate_channel_name(
+        ticket_data.get("ticket_id"),
+        ticket_data.get("project_key"),
+        ticket_data.get("customer"),
+        ticket_data.get("priority"),
+        _naming_config,
+    )
+
+
+def provision_channel(messenger: "SlackMessenger", ticket_data: Dict[str, Any], invite_user_ids,
+                      run: AuditLogger, starter_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Create the standard ticket channel, invite members and post the starter message; steps go on run."""
+    # starter_data: backfills post the starter as the ticket was when opened; the name follows the current ticket.
+    ticket_id = ticket_data.get("ticket_id")
+    t = time.time()
+    channel_name, errors = channel_name_for(ticket_data)
+    if errors:
+        reason = "; ".join(errors)
+        logger.error(f"Cannot build channel name for {ticket_id}: {reason}")
+        run.record_step(1, "Generate channel name", "failure", time.time() - t,
+                        error={"type": "invalid_ticket_fields", "message": reason})
+        return {"final_status": "failure", "channel_name": None, "channel_id": None}
+    run.record_step(1, "Generate channel name", "success", time.time() - t, details={"channel_name": channel_name})
+    logger.info(f"Syncing {ticket_id} to Slack channel {channel_name}")
+
+    t = time.time()
+    channel_result = messenger.create_channel(channel_name)
+    if channel_result.get("exists"):
+        logger.info(f"Channel {channel_name} already exists, avoiding channel duplication")
+        run.record_step(2, "Create channel", "skipped", time.time() - t, details={"reason": "channel_already_exists"})
+        return {"final_status": "skipped", "channel_name": channel_name, "channel_id": None}
+    if not channel_result.get("success"):
+        logger.error(f"Failed to create channel {channel_name}: {channel_result.get('error')}")
+        run.record_step(2, "Create channel", "failure", time.time() - t,
+                        error={"type": "slack_create_failed", "message": str(channel_result.get("error"))})
+        return {"final_status": "failure", "channel_name": channel_name, "channel_id": None}
+    channel_id = channel_result["channel_id"]
+    run.record_step(2, "Create channel", "success", time.time() - t, details={"channel_id": channel_id})
+
+    if invite_user_ids:
+        t = time.time()
+        invited = messenger.invite_users(channel_id, list(invite_user_ids))
+        run.record_step(3, "Invite members", "success" if invited else "failure", time.time() - t,
+                        details={"user_ids": list(invite_user_ids)})
+    else:
+        run.record_step(3, "Invite members", "skipped", 0, details={"reason": "SLACK_INVITE_USER_IDS not set"})
+
+    t = time.time()
+    message_data = format_starter_message(starter_data or ticket_data)
+    sent = messenger.send_message(channel_id, message_data["text"], message_data["blocks"])
+    run.record_step(4, "Post starter message", "success" if sent else "failure", time.time() - t)
+    if sent:
+        logger.info(f"Starter message sent to {channel_name}")
+    else:
+        logger.error(f"Failed to send starter message to {channel_name}")
+    return {"final_status": "success" if sent else "failure", "channel_name": channel_name, "channel_id": channel_id}
+
+
 def create_sync_callback(config: WebhookConfig) -> Optional[Callable]:
-    """
-    Create a sync callback function that sends messages to Slack.
-
-    Args:
-        config: WebhookConfig with slack_token
-
-    Returns:
-        Callback function or None if Slack is not configured
-    """
+    """Return a callback that hands each Jira issue event to the shared sync engine (same logic as the poller)."""
     if not config.slack_token:
         logger.warning("Slack token not configured, sync callback disabled")
         return None
 
-    messenger = SlackMessenger(config.slack_token)
+    from sync_engine import ChannelState, SyncEngine, default_state_path  # lazy: sync_engine imports this module
+    import yaml
+
+    sync_cfg = (yaml.safe_load(NAMING_CONFIG_PATH.read_text()).get("tier_2") or {}).get("sync") or {}
+    engine = SyncEngine(SlackMessenger(config.slack_token), ChannelState(default_state_path()),
+                        sync_cfg.get("archive_on_status", []), config.slack_invite_user_ids)
 
     def sync_callback(task: Dict[str, Any]) -> None:
-        """Process sync task: create channel and send starter message."""
         try:
-            ticket_id = task.get("ticket_id")
-            ticket_data = task.get("ticket_data", {})
-
-            if not ticket_id:
-                logger.error("No ticket_id in task")
-                return
-
-            channel_name = f"{config.slack_channel_prefix}-{ticket_id.lower()}"
-            logger.info(f"Syncing {ticket_id} to Slack channel {channel_name}")
-
-            channel_result = messenger.create_channel(channel_name)
-            if not channel_result.get("success"):
-                if not channel_result.get("exists"):
-                    logger.error(f"Failed to create channel: {channel_result.get('error')}")
-                    return
-
-            channel_id = channel_result.get("channel_id")
-            if not channel_id:
-                logger.warning(f"Channel {channel_name} already exists, looking up ID")
-                return
-
-            if config.slack_invite_user_ids:
-                messenger.invite_users(channel_id, list(config.slack_invite_user_ids))
-
-            message_data = format_starter_message(ticket_data)
-            success = messenger.send_message(
-                channel_id,
-                message_data["text"],
-                message_data["blocks"],
-            )
-
-            if success:
-                logger.info(f"Starter message sent to {channel_name}")
-            else:
-                logger.error(f"Failed to send starter message to {channel_name}")
-
+            outcome = engine.process(task["issue"], source="webhook",
+                                     is_new=task.get("event_type") == "jira:issue_created")
+            logger.info(f"{task.get('ticket_id')}: {outcome}")
         except Exception as e:
             logger.error(f"Error in sync callback: {e}")
+            run = AuditLogger(task.get("ticket_id") or "unknown", None, None, None, source="webhook")
+            run.record_step(99, "Unexpected error", "failure", None, error={"type": type(e).__name__, "message": str(e)})
+            run.finalize(None, "failure")
 
     return sync_callback
 
@@ -546,8 +643,9 @@ def create_webhook_app(config: WebhookConfig, sync_callback: Optional[Callable] 
         """Receive Jira webhook event."""
         payload = request.get_data()
         signature = request.headers.get("X-Hub-Signature", "")
+        token = request.headers.get("X-Webhook-Token", "")
 
-        result = handler.handle_webhook(payload, signature)
+        result = handler.handle_webhook(payload, signature, token)
 
         # Return appropriate status code
         if result["status"] == "queued":
@@ -555,9 +653,15 @@ def create_webhook_app(config: WebhookConfig, sync_callback: Optional[Callable] 
         else:
             return jsonify(result), 400
 
+    def local_only():
+        # Requests arriving through ngrok (or any proxy) carry X-Forwarded-For; keep internals off the internet.
+        return "X-Forwarded-For" not in request.headers
+
     @app.route("/webhooks/status", methods=["GET"])
     def webhook_status():
         """Get webhook handler status."""
+        if not local_only():
+            return jsonify({"status": "error", "message": "Not found"}), 404
         return jsonify(handler.get_status()), 200
 
     @app.route("/webhooks/health", methods=["GET"])
@@ -568,6 +672,8 @@ def create_webhook_app(config: WebhookConfig, sync_callback: Optional[Callable] 
     @app.route("/webhooks/queue", methods=["GET"])
     def get_queue():
         """Get queue status and next task (for testing)."""
+        if not local_only():
+            return jsonify({"status": "error", "message": "Not found"}), 404
         return jsonify({
             "queue_size": handler.queue.size(),
             "stats": handler.queue.stats(),
@@ -576,18 +682,29 @@ def create_webhook_app(config: WebhookConfig, sync_callback: Optional[Callable] 
     return app
 
 
-# Create app for production deployment (Gunicorn)
-config = WebhookConfig(
-    secret=os.environ.get("JIRA_WEBHOOK_SECRET", "test-secret"),
-    debug=os.environ.get("DEBUG", "false").lower() == "true",
-    slack_token=os.environ.get("SLACK_BOT_TOKEN"),
-    slack_channel_prefix=os.environ.get("SLACK_CHANNEL_PREFIX", "ticket"),
-    slack_invite_user_ids=tuple(
-        uid.strip() for uid in os.environ.get("SLACK_INVITE_USER_IDS", "").split(",") if uid.strip()
-    ),
-)
-sync_callback = create_sync_callback(config)
-app = create_webhook_app(config, sync_callback)
+def config_from_env(secret: Optional[str] = None, **overrides) -> WebhookConfig:
+    """Build config from the environment; refuses to run without a webhook secret."""
+    secret = secret or os.environ.get("JIRA_WEBHOOK_SECRET")
+    if not secret:
+        raise RuntimeError(
+            "JIRA_WEBHOOK_SECRET is not set. Refusing to start: without a secret, "
+            "anyone who can reach this server could sign fake Jira events."
+        )
+    settings = {
+        "debug": os.environ.get("DEBUG", "false").lower() == "true",
+        "slack_token": os.environ.get("SLACK_BOT_TOKEN"),
+        "slack_invite_user_ids": tuple(
+            uid.strip() for uid in os.environ.get("SLACK_INVITE_USER_IDS", "").split(",") if uid.strip()
+        ),
+    }
+    settings.update(overrides)
+    return WebhookConfig(secret=secret, **settings)
+
+
+def create_app_from_env():
+    """Gunicorn app factory: gunicorn 'webhook_server:create_app_from_env()'."""
+    config = config_from_env()
+    return create_webhook_app(config, create_sync_callback(config))
 
 
 def main():
@@ -597,19 +714,20 @@ def main():
     parser = argparse.ArgumentParser(description="Jira webhook server for ticket sync")
     parser.add_argument("--port", type=int, default=5000, help="Port to listen on")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--secret", default="test-secret", help="Jira webhook secret")
+    parser.add_argument("--secret", help="Jira webhook secret (default: $JIRA_WEBHOOK_SECRET)")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
 
     args = parser.parse_args()
 
-    config = WebhookConfig(
-        secret=args.secret,
-        port=args.port,
-        host=args.host,
-        debug=args.debug,
-    )
+    overrides = {"port": args.port, "host": args.host}
+    if args.debug:
+        overrides["debug"] = True
+    try:
+        config = config_from_env(args.secret, **overrides)
+    except RuntimeError as e:
+        parser.error(str(e))
 
-    app = create_webhook_app(config)
+    app = create_webhook_app(config, create_sync_callback(config))
 
     logger.info(f"Starting webhook server on {config.host}:{config.port}")
     logger.info(f"Endpoints:")

@@ -8,6 +8,8 @@ and circuit breaker pattern.
 Run: python3 tests/test_retry_logic.py
 """
 import sys
+import os
+os.environ.setdefault("CTC_RUN_MODE", "test")
 import time
 from pathlib import Path
 

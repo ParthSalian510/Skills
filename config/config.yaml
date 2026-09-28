@@ -169,7 +169,13 @@ timeouts:
   # This is a safety valve to prevent the entire skill from hanging.
   overall_timeout: 120  # 2 minutes max per run
 
-audit_log_path: "~/.claude/skills/create-ticket-channel/audit.log.jsonl"
+# Run logs: one JSON line per run, one file per source, in <skill>/logs/
+# (paths are fixed in scripts/run_log.py; CTC_LOG_DIR overrides the directory):
+#   skill-runs.jsonl  live Claude runs of SKILL.md   (written in Step 6)
+#   webhook.jsonl     scripts/webhook_server.py
+#   poller.jsonl      scripts/jira_poller.py
+#   executor.jsonl    scripts/skill_executor.py (placeholder data only)
+#   tests.jsonl       tests/, and anything run with CTC_RUN_MODE=test
 
 # Tier 2: Ticket-to-Channel Sync
 # Keeps Slack channels synchronized with Jira ticket status and properties.
@@ -178,11 +184,19 @@ tier_2:
     # Enable/disable Tier 2 sync feature
     enabled: true
 
-    # Sync trigger method: "webhook" for real-time, "polling" for fallback
-    trigger: "webhook"
-
-    # Polling interval (if webhook unavailable), in seconds
-    polling_interval_seconds: 300  # 5 minutes
+    # Read by scripts/jira_poller.py. Jira Cloud can't reach a local webhook,
+    # so polling is the active trigger; the webhook server stays available.
+    trigger: "polling"
+    polling_interval_seconds: 60
+    # Each poll asks Jira for tickets updated in the last N minutes (JQL
+    # "updated" is minute-precision, so keep >= 2). After downtime the poller
+    # widens this automatically to cover the gap since its last good poll.
+    polling_lookback_minutes: 2
+    # Projects to watch. New tickets in these get a channel automatically;
+    # tickets that existed before the poller first started are ignored
+    # unless registered with `jira_poller.py track`.
+    polling_projects:
+      - CASE
 
     # What to sync from Jira to Slack
     sync_status: true       # Update channel topic with status

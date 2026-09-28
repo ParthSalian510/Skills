@@ -8,6 +8,8 @@ and endpoint behavior.
 Run: python3 tests/test_webhook_server.py
 """
 import sys
+import os
+os.environ.setdefault("CTC_RUN_MODE", "test")
 import json
 import hmac
 import hashlib
@@ -352,6 +354,151 @@ try:
 except Exception as e:
     failed += 1
     print(f"✗ Multiple events tests failed: {e}")
+
+# Standard channel naming, secret enforcement and run logs
+import tempfile
+import webhook_server as ws
+
+
+def read_log(log_dir):
+    path = Path(log_dir) / "tests.jsonl"
+    return [json.loads(l) for l in path.read_text().splitlines()] if path.exists() else []
+
+
+try:
+    ticket = {"ticket_id": "CASE-4009", "project_key": "CASE", "customer": "ISOC", "priority": "P3"}
+    name, errors = ws.channel_name_for(ticket)
+    check("Standard name for P3", name == "case-4009-isoc-low", f"got {name} {errors}")
+    name, _ = ws.channel_name_for({**ticket, "priority": "P2"})
+    check("Standard name for P2", name == "case-4009-isoc-med", f"got {name}")
+    name, errors = ws.channel_name_for({**ticket, "customer": None})
+    check("Missing customer is an error, not a guess", name is None and bool(errors))
+
+    data = WebhookValidator.extract_event_data({"webhookEvent": "jira:issue_created", "issue": {
+        "key": "CASE-4009", "fields": {"customfield_10002": [{"name": "ISOC"}, {"name": "Other"}],
+                                        "project": {"key": "CASE"}}}})
+    check("Customer is first organisation", data["customer"] == "ISOC")
+    check("Missing priority stays missing", data["priority"] is None)
+except Exception as e:
+    failed += 1
+    print(f"✗ Naming tests failed: {e}")
+
+try:
+    saved = os.environ.pop("JIRA_WEBHOOK_SECRET", None)
+    try:
+        ws.config_from_env()
+        check("Refuses to start without secret", False)
+    except RuntimeError as e:
+        check("Refuses to start without secret", "JIRA_WEBHOOK_SECRET" in str(e))
+    check("Explicit secret accepted", ws.config_from_env("s3cret").secret == "s3cret")
+    check("No module-level app with a default secret", not hasattr(ws, "app"))
+    if saved is not None:
+        os.environ["JIRA_WEBHOOK_SECRET"] = saved
+except Exception as e:
+    failed += 1
+    print(f"✗ Secret tests failed: {e}")
+
+
+class FakeMessenger:
+    def __init__(self, exists=False):
+        self.exists, self.calls = exists, []
+
+    def create_channel(self, name):
+        self.calls.append(("create", name))
+        if self.exists:
+            return {"success": True, "channel_id": None, "exists": True}
+        return {"success": True, "channel_id": "C123"}
+
+    def invite_users(self, channel_id, user_ids):
+        self.calls.append(("invite", channel_id))
+        return True
+
+    def send_message(self, channel_id, text, blocks=None):
+        self.calls.append(("send", channel_id))
+        return True
+
+    def set_topic(self, channel_id, topic):
+        self.calls.append(("topic", channel_id))
+        return True
+
+    def archive_channel(self, channel_id):
+        self.calls.append(("archive", channel_id))
+        return True
+
+
+def jira_issue(key="CASE-4009", status="Pending", priority="P3"):
+    return {"key": key, "self": "https://bloo-systems.atlassian.net/rest/api/2/issue/1", "fields": {
+        "summary": "ISOC | High memory", "status": {"name": status}, "priority": {"name": priority},
+        "project": {"key": "CASE"}, "customfield_10002": [{"name": "ISOC"}],
+        "created": "2020-01-01T00:00:00.000+0000"}}
+
+
+def event_task(event_type, **kw):
+    issue = jira_issue(**kw)
+    data = WebhookValidator.extract_event_data({"webhookEvent": event_type, "issue": issue})
+    return {"ticket_id": issue["key"], "event_type": event_type, "ticket_data": data, "issue": issue}
+
+
+real_messenger = ws.SlackMessenger
+try:
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["CTC_LOG_DIR"] = tmp
+
+        os.environ["CTC_STATE_PATH"] = str(Path(tmp) / "exists.json")
+        fake = FakeMessenger(exists=True)
+        ws.SlackMessenger = lambda token: fake
+        ws.create_sync_callback(WebhookConfig(secret="s", slack_token="xoxb-test"))(event_task("jira:issue_created"))
+        entry = read_log(tmp)[-1]
+        check("Existing channel: no invite or message", [c[0] for c in fake.calls] == ["create"])
+        check("Existing channel logged as skipped", entry["summary"]["final_status"] == "skipped")
+        check("Skip reason recorded", entry["steps"][-1]["details"]["reason"] == "channel_already_exists")
+        check("Record carries source and mode", entry["source"] == "webhook" and entry["mode"] == "test")
+
+        os.environ["CTC_STATE_PATH"] = str(Path(tmp) / "new.json")
+        fake = FakeMessenger()
+        ws.SlackMessenger = lambda token: fake
+        cb = ws.create_sync_callback(WebhookConfig(secret="s", slack_token="xoxb-test", slack_invite_user_ids=("U1",)))
+        cb(event_task("jira:issue_created"))
+        entry = read_log(tmp)[-1]
+        check("New channel uses standard name", fake.calls[0] == ("create", "case-4009-isoc-low"))
+        check("Success run logs 4 steps", [s["name"] for s in entry["steps"]] == [
+            "Generate channel name", "Create channel", "Invite members", "Post starter message"])
+        check("Success run final status", entry["summary"]["final_status"] == "success")
+
+        fake.calls.clear()
+        cb(event_task("jira:issue_created"))
+        check("Repeated created event does not re-create", fake.calls == [], fake.calls)
+        cb(event_task("jira:issue_updated", priority="P1"))
+        check("Update event syncs via shared engine", [c[0] for c in fake.calls] == ["topic", "send"], fake.calls)
+        fake.calls.clear()
+        cb(event_task("jira:issue_updated", key="CASE-4100"))
+        check("Updated event for old untracked ticket ignored", fake.calls == [], fake.calls)
+
+        payload = b'{"webhookEvent": "jira:issue_updated", "issue": {"key": "X-1"}}'
+        WebhookHandler(WebhookConfig(secret="right")).handle_webhook(payload, "sha256=wrong")
+        entry = read_log(tmp)[-1]
+        check("Rejected signature is logged", entry["summary"]["final_status"] == "rejected")
+
+        h = WebhookHandler(WebhookConfig(secret="right"))
+        body = json.dumps({"webhookEvent": "jira:issue_updated", "issue": jira_issue()}).encode()
+        check("Shared-secret header accepted", h.handle_webhook(body, "", token="right")["status"] == "queued")
+        check("Wrong shared-secret header rejected", h.handle_webhook(body, "", token="nope")["status"] == "error")
+
+        client = ws.create_webhook_app(WebhookConfig(secret="right")).test_client()
+        check("Status visible locally", client.get("/webhooks/status").status_code == 200)
+        check("Status hidden through a tunnel",
+              client.get("/webhooks/status", headers={"X-Forwarded-For": "1.2.3.4"}).status_code == 404)
+        check("Queue hidden through a tunnel",
+              client.get("/webhooks/queue", headers={"X-Forwarded-For": "1.2.3.4"}).status_code == 404)
+        check("Health still public",
+              client.get("/webhooks/health", headers={"X-Forwarded-For": "1.2.3.4"}).status_code == 200)
+except Exception as e:
+    failed += 1
+    print(f"✗ Sync callback logging tests failed: {type(e).__name__}: {e}")
+finally:
+    os.environ.pop("CTC_LOG_DIR", None)
+    os.environ.pop("CTC_STATE_PATH", None)
+    ws.SlackMessenger = real_messenger
 
 # Summary
 print(f"\n{passed} passed, {failed} failed")

@@ -8,6 +8,8 @@ and that SKILL.md documents the timeout handling strategy.
 Run: python3 tests/test_timeout_config.py
 """
 import sys
+import os
+os.environ.setdefault("CTC_RUN_MODE", "test")
 from pathlib import Path
 
 passed = 0

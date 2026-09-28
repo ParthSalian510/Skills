@@ -31,6 +31,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from run_log import log_path_for, resolve_mode
+
 
 def generate_run_id():
     """Generate a unique run ID."""
@@ -43,9 +45,11 @@ def generate_run_id():
 class AuditLogger:
     """Enhanced audit logger for skill execution."""
 
-    def __init__(self, ticket_id, ticket_type, customer, priority, log_path=None):
+    def __init__(self, ticket_id, ticket_type, customer, priority, log_path=None, source="skill", mode="live"):
         """Initialize audit logger."""
         self.run_id = generate_run_id()
+        self.source = source
+        self.mode = resolve_mode(mode)
         self.ticket_id = ticket_id
         self.ticket_type = ticket_type
         self.customer = customer
@@ -54,9 +58,7 @@ class AuditLogger:
         self.start_time = time.time()
         self.current_step_actions = {}
 
-        if log_path is None:
-            log_path = Path.home() / ".claude" / "skills" / "create-ticket-channel" / "audit.log.jsonl"
-        self.log_path = Path(log_path)
+        self.log_path = Path(log_path) if log_path is not None else log_path_for(source)
 
     def record_step(self, step_num, step_name, status, duration_seconds, details=None, error=None):
         """
@@ -74,8 +76,9 @@ class AuditLogger:
             "step": step_num,
             "name": step_name,
             "status": status,
-            "duration_seconds": round(duration_seconds, 2),
         }
+        if duration_seconds is not None:
+            step_record["duration_seconds"] = round(duration_seconds, 2)
 
         if details:
             step_record["details"] = details
@@ -115,7 +118,7 @@ class AuditLogger:
 
         self.current_step_actions[step_num].append(action_record)
 
-    def finalize(self, channel_name, final_status):
+    def finalize(self, channel_name, final_status, duration_seconds=None):
         """
         Finalize the audit log entry and write to file.
 
@@ -123,10 +126,12 @@ class AuditLogger:
             channel_name: The channel created (or None if skipped/failed)
             final_status: "success", "failure", "skipped", "dry_run"
         """
-        total_duration = time.time() - self.start_time
+        total_duration = duration_seconds if duration_seconds is not None else time.time() - self.start_time
 
         log_entry = {
             "run_id": self.run_id,
+            "source": self.source,
+            "mode": self.mode,
             "ticket_id": self.ticket_id,
             "ticket_type": self.ticket_type,
             "customer": self.customer,
@@ -144,8 +149,8 @@ class AuditLogger:
             }
         }
 
-        # Write to audit log
         self._write_log_entry(log_entry)
+        return log_entry
 
     def _write_log_entry(self, log_entry):
         """Write a log entry to the JSONL file."""
