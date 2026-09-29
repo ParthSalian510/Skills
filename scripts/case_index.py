@@ -166,8 +166,21 @@ def _page_name(text: str) -> str:
     return re.sub(r"[\\/:*?\"<>|#^\[\]]+", " ", text).strip()[:80] or "unnamed"
 
 
+def _without_customers(text: str, own: str, customers: List[str]) -> str:
+    """Drop customer names from page text. A leading "ACME || " goes; elsewhere the case's own customer
+    becomes "the customer" and any other known customer "another customer"."""
+    if not text:
+        return text
+    for c in customers:  # longest first, so "ACME Labs" goes before a shorter name inside it
+        name = re.escape(c)
+        text = re.sub(rf"^\s*{name}s?\s*[|:\-–]+\s*", "", text, flags=re.I)
+        swap = "the customer" if c.lower() == own.lower() else "another customer"
+        text = re.sub(rf"(?<!\w)(?:the\s+)?{name}s?(?!\w)", swap, text, flags=re.I)
+    return text
+
+
 def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
-    """One Markdown page per case plus one per component/customer/version, linked with [[wikilinks]].
+    """One Markdown page per case plus one per shared component/keyword, linked with [[wikilinks]].
 
     Readable as-is (Obsidian, any Markdown viewer), and the input for a graph tool.
     Rewritten from scratch each time, so it always matches the index.
@@ -183,25 +196,29 @@ def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
     for e in index.entries():
         for key in concepts_of(e):
             seen[key] = seen.get(key, 0) + 1
+    customers = sorted({(e.get("customer") or "").strip() for e in index.entries()} - {""}, key=len, reverse=True)
+    named = re.compile("|".join(rf"(?<!\w){re.escape(c)}(?!\w)" for c in customers), re.I) if customers else None
     for e in index.entries():
-        # Customer and version stay plain text, not graph links: with enough history each became a hub
-        # (one customer linked 28 cases), so topics grouped by customer instead of by kind of problem.
-        # Both remain on the page and searchable (case_index.py search).
-        links = [f"{kind} {value}" for kind, value in (("customer", e.get("customer")),
-                                                       ("version", e.get("product_version"))) if value]
+        # No customer on the pages: even as plain text, Graphify's semantic pass made each customer a hub
+        # (one linked 28 cases), so topics grouped by customer instead of by kind of problem. The name stays
+        # in index/cases.jsonl, search and #case-index; only the graph input leaves it out.
+        cust = (e.get("customer") or "").strip()
+        text = {k: _without_customers(e.get(k) or "", cust, customers) for k in ("title", "problem", "root_cause", "fix")}
+        links = [f"version {e['product_version']}"] if e.get("product_version") else []
         comp_links = []
         for key, display in concepts_of(e).items():
-            if seen[key] < 2:  # only concepts shared by several cases get a page; the rest stay plain text
-                comp_links.append(display)
+            # only concepts shared by several cases get a page, and never one named after a customer
+            if seen[key] < 2 or (named and named.search(key)):
+                comp_links.append(_without_customers(display, cust, customers))
                 continue
             page = _page_name(key)
             concept_cases.setdefault(page, []).append(e["ticket_id"])
             names.setdefault(page, display)
             comp_links.append(f"[[{page}|{display}]]")
-        body = [f"# {e['ticket_id']} · {e.get('title') or ''}", "",
-                f"Closed {(e.get('closed') or '?')[:10]} · priority {e.get('priority') or '?'} · " + " · ".join(links), "",
-                f"**Problem:** {e.get('problem') or '-'}", "", f"**Root cause:** {e.get('root_cause') or '-'}", "",
-                f"**Fix:** {e.get('fix') or '-'}", "", "**Involves:** " + (", ".join(comp_links) or "-")]
+        body = [f"# {e['ticket_id']} · {text['title']}", "",
+                " · ".join([f"Closed {(e.get('closed') or '?')[:10]}", f"priority {e.get('priority') or '?'}"] + links), "",
+                f"**Problem:** {text['problem'] or '-'}", "", f"**Root cause:** {text['root_cause'] or '-'}", "",
+                f"**Fix:** {text['fix'] or '-'}", "", "**Involves:** " + (", ".join(comp_links) or "-")]
         if e.get("jira_url"):
             body += ["", f"[Open in Jira]({e['jira_url']})"]
         (out_dir / "cases" / f"{e['ticket_id']}.md").write_text("\n".join(body) + "\n")

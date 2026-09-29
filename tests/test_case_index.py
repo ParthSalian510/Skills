@@ -69,7 +69,9 @@ with tempfile.TemporaryDirectory() as tmp:
                      keywords=["oom killer"], closed="2026-09-28"))
     idx.upsert(entry("CASE-2", title="Datanode memory", customer="Beta", components=["NameNode"], keywords=["oom killer"],
                      closed="2026-09-20"))
-    idx.upsert(entry("CASE-3", title="Login broken", customer="ACME", components=["Console"], keywords=["sso"]))
+    idx.upsert(entry("CASE-3", title="ACME | Login broken", customer="ACME", keywords=["sso"],
+                     problem="ACME users could not sign in; Beta was fine", fix="Reset the acme SSO realm",
+                     components=["Console", "ACME test setup"]))
     check("Concept keys normalise names", ci.concept("Namenode service") == ci.concept("NameNode") == "namenode"
           and ci.concept("Adapter queues") == "adapter queue" and ci.concept("Falcon Sensor (CrowdStrike)") == "falcon sensor"
           and ci.concept("High EPS") == "high eps" and ci.concept("Slow queries") == "slow query")
@@ -83,7 +85,14 @@ with tempfile.TemporaryDirectory() as tmp:
     check("Export writes a page per case", sorted(p.name for p in (out / "cases").iterdir()) == ["CASE-1.md", "CASE-2.md", "CASE-3.md"])
     page = (out / "cases" / "CASE-1.md").read_text()
     check("Case page links concepts with wikilinks", "[[namenode|Namenode service]]" in page, page)
-    check("Customer is plain text on the page, not a graph link", "customer ACME" in page and "[[customer" not in page, page)
+    check("Customer left off the page entirely", "ACME" not in page and "customer" not in page.lower(), page)
+    p3 = (out / "cases" / "CASE-3.md").read_text()
+    check("Customer name stripped from title and summary text",
+          "acme" not in p3.lower() and "# CASE-3 · Login broken" in p3
+          and "the customer users could not sign in" in p3 and "Reset the customer SSO realm" in p3
+          and "the customer test setup" in p3, p3)
+    check("Other customers named on a page become 'another customer'", "Beta" not in p3 and "another customer was fine" in p3, p3)
+    check("Customer still in the index itself", idx.get("CASE-3")["customer"] == "ACME")
     check("Product version is plain text, not a graph link", "[[version" not in page)
     check("Concepts in only one case stay plain text", "CORE server" in page and "[[core" not in page, page)
     nn = (out / "concepts" / "namenode.md").read_text()
