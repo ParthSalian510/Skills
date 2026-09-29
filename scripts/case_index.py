@@ -184,17 +184,11 @@ def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
         for key in concepts_of(e):
             seen[key] = seen.get(key, 0) + 1
     for e in index.entries():
-        links = []
-        # Versions stay plain text: nearly every case has one of a few versions, so as graph links they
-        # became the most-connected hubs and pulled unrelated cases into every query.
-        if e.get("product_version"):
-            links.append(f"version {e['product_version']}")
-        for kind, value in (("customer", e.get("customer")),):
-            if value:
-                page = _page_name(f"{kind} {value}")
-                links.append(f"[[{page}]]")
-                concept_cases.setdefault(page, []).append(e["ticket_id"])
-                names[page] = f"{kind.title()}: {value}"
+        # Customer and version stay plain text, not graph links: with enough history each became a hub
+        # (one customer linked 28 cases), so topics grouped by customer instead of by kind of problem.
+        # Both remain on the page and searchable (case_index.py search).
+        links = [f"{kind} {value}" for kind, value in (("customer", e.get("customer")),
+                                                       ("version", e.get("product_version"))) if value]
         comp_links = []
         for key, display in concepts_of(e).items():
             if seen[key] < 2:  # only concepts shared by several cases get a page; the rest stay plain text

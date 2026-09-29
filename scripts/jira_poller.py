@@ -193,8 +193,13 @@ def main(argv=None) -> int:
     sm.add_argument("ticket_id")
     sm.add_argument("--dry-run", action="store_true", help="print the summary; no Slack calls")
     ix = sub.add_parser("index", help="add closed tickets to the case index (#case-index + index/cases.jsonl)")
-    ix.add_argument("ticket_ids", nargs="+")
+    ix.add_argument("ticket_ids", nargs="*")
     ix.add_argument("--dry-run", action="store_true", help="print the entries; write and post nothing")
+    ix.add_argument("--from-file", help="read ticket keys (whitespace-separated) from this file")
+    ix.add_argument("--no-post", action="store_true", help="index file and pages only; no Slack posts (bulk backfills)")
+    ix.add_argument("--skip-indexed", action="store_true", help="skip tickets already in the index (resume a batch)")
+    ix.add_argument("--retry-wait", type=int, default=600,
+                    help="seconds to wait before retrying a failed summary once, e.g. a plan usage limit (default 600)")
     ic = sub.add_parser("index-channel", help="use an existing Slack channel as #case-index")
     ic.add_argument("channel_id")
     args = p.parse_args(argv)
@@ -238,21 +243,56 @@ def main(argv=None) -> int:
     if args.cmd == "index":
         if not (poller.engine.summarizer and poller.engine.case_index is not None):
             raise SystemExit("Case index is off: enable tier_2.sync.summaries and tier_2.sync.case_index in config")
+        keys = [k.upper() for k in args.ticket_ids]
+        if args.from_file:
+            keys += [k.upper() for k in Path(args.from_file).read_text().split()]
+        keys = list(dict.fromkeys(keys))
+        if args.skip_indexed:
+            done = {e["ticket_id"] for e in poller.engine.case_index.entries()}
+            keys = [k for k in keys if k not in done]
         results = []
-        for key in (k.upper() for k in args.ticket_ids):
+        for n, key in enumerate(keys, start=1):
             issue = poller.jira.get_issue(key, JIRA_FIELDS)
             status = ((issue.get("fields") or {}).get("status") or {}).get("name")
             if status not in poller.engine.archive_statuses and not args.dry_run:
                 results.append({"outcome": "not_closed", "ticket_id": key, "status": status})
                 continue
             comments = poller.jira.get_comments(key)
-            with poller.state.locked():
-                tracked = poller.state.tickets.get(key)
-                result = poller.engine.close_case(issue, comments, tracked=tracked, source="poller",
-                                                  dry_run=args.dry_run)
+            post = not args.no_post
+            for attempt in (1, 2):
+                with poller.state.locked():
+                    tracked = poller.state.tickets.get(key)
+                if post or tracked is not None:
+                    # posting or updating a tracked ticket touches shared state: hold the lock
+                    with poller.state.locked():
+                        tracked = poller.state.tickets.get(key)
+                        result = poller.engine.close_case(issue, comments, tracked=tracked, source="poller",
+                                                          dry_run=args.dry_run, post=post)
+                else:
+                    # index-only for an untracked ticket: no shared state, so the live poller isn't blocked
+                    result = poller.engine.close_case(issue, comments, tracked=None, source="poller",
+                                                      dry_run=args.dry_run, post=False)
+                if result["outcome"] != "failed" or attempt == 2 or args.dry_run:
+                    break
+                logger.warning(f"{key}: summary failed; retrying in {args.retry_wait}s (plan limit or transient error)")
+                time.sleep(args.retry_wait)
             results.append(result)
-        print(json.dumps(results, indent=2, ensure_ascii=False))
-        return 0 if all(r["outcome"] in ("indexed", "dry_run") for r in results) else 1
+            logger.info(f"[{n}/{len(keys)}] {key}: {result['outcome']}")
+        if args.no_post and not args.dry_run:
+            added = sum(r["outcome"] == "indexed" for r in results)
+            if added:
+                with poller.state.locked():
+                    cid = poller.engine.index_channel_id()
+                    if cid:
+                        poller.engine.messenger.post_message(
+                            cid, f"*{added} past case{'s' if added != 1 else ''} added to the index* (backfill, "
+                                 f"not posted one by one). Search with `case_index.py search` or ask Claude via case-graph.")
+        slim = [{k: r.get(k) for k in ("ticket_id", "outcome", "status")} for r in results]
+        print(json.dumps(slim if len(results) > 5 else results, indent=2, ensure_ascii=False))
+        failed_keys = [r["ticket_id"] for r in results if r["outcome"] == "failed"]
+        if failed_keys:
+            print("Failed (re-run with --skip-indexed to retry): " + " ".join(failed_keys), file=sys.stderr)
+        return 0 if all(r["outcome"] in ("indexed", "dry_run", "not_closed") for r in results) else 1
     if args.cmd == "once":
         print(json.dumps(poller.poll_once()))
         return 0

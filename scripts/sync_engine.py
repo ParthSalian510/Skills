@@ -253,10 +253,11 @@ class SyncEngine:
                 "public_comments": len(public), "indexed_at": utcnow().isoformat()}
 
     def close_case(self, issue: Dict[str, Any], comments: List[Dict[str, Any]], tracked: Optional[Dict[str, Any]] = None,
-                   source: str = "poller", dry_run: bool = False) -> Dict[str, Any]:
+                   source: str = "poller", dry_run: bool = False, post: bool = True) -> Dict[str, Any]:
         """Resolution summary → index file + #case-index (+ the ticket's own channel if it's still open).
 
-        Caller holds the state lock when tracked is given. Nothing is posted if the summary failed:
+        Caller holds the state lock when tracked is given or post is True (the #case-index id lives in state).
+        post=False (bulk backfills) writes the index and pages only. Nothing is posted if the summary failed:
         the ticket can be indexed later with `jira_poller.py index KEY`.
         """
         entry = self.build_index_entry(issue, comments, tracked)
@@ -274,10 +275,10 @@ class SyncEngine:
         except Exception as e:
             logger.error(f"Case pages not refreshed: {e}")
         posted_index = posted_channel = False
-        cid = self.index_channel_id()
+        cid = self.index_channel_id() if post else None
         if cid:
             posted_index = bool(self.messenger.post_message(cid, format_index_message(entry)))
-        if tracked and tracked.get("channel_id") and not tracked.get("archived"):
+        if post and tracked and tracked.get("channel_id") and not tracked.get("archived"):
             posted_channel = bool(self.messenger.post_message(tracked["channel_id"],
                                                               format_index_message(entry, in_channel=True)))
         if tracked is not None:

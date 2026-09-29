@@ -82,7 +82,8 @@ with tempfile.TemporaryDirectory() as tmp:
     counts = ci.export_pages(idx, out)
     check("Export writes a page per case", sorted(p.name for p in (out / "cases").iterdir()) == ["CASE-1.md", "CASE-2.md", "CASE-3.md"])
     page = (out / "cases" / "CASE-1.md").read_text()
-    check("Case page links concepts with wikilinks", "[[namenode|Namenode service]]" in page and "[[customer ACME]]" in page, page)
+    check("Case page links concepts with wikilinks", "[[namenode|Namenode service]]" in page, page)
+    check("Customer is plain text on the page, not a graph link", "customer ACME" in page and "[[customer" not in page, page)
     check("Product version is plain text, not a graph link", "[[version" not in page)
     check("Concepts in only one case stay plain text", "CORE server" in page and "[[core" not in page, page)
     nn = (out / "concepts" / "namenode.md").read_text()
@@ -200,6 +201,10 @@ with tempfile.TemporaryDirectory() as tmp:
           r["outcome"] == "indexed" and not any(c[0] == "create" for c in slack.calls)
           and [c[1] for c in slack.calls if c[0] == "post"] == ["CIDX"], slack.calls)
 
+    slack.calls.clear()
+    r = eng.close_case({**issue("Completed"), "key": "CASE-3002"}, [], tracked=None, post=False)
+    check("Index-only (post=False) writes the entry but posts nothing",
+          r["outcome"] == "indexed" and idx.get("CASE-3002") and slack.calls == [], slack.calls)
     dry = eng.close_case(issue("Completed"), [], dry_run=True)
     check("Dry run writes and posts nothing", dry["outcome"] == "dry_run" and "*Problem:*" in dry["message"])
 

@@ -972,8 +972,10 @@ Claude CLI backend. The output is `index/pages/graphify-out/`: `graph.json`,
   Code session can query past cases with `query_graph`, `get_node`,
   `get_neighbors` and `shortest_path`.
 - Requires `pipx install "graphifyy[mcp]"`.
-- Product versions are plain text on the pages, not graph nodes. Otherwise
-  they become hubs that link unrelated cases.
+- Product versions and customers are plain text on the pages, not graph
+  nodes. With enough history each became a hub (one customer linked 28
+  cases), and topics grouped by customer instead of by kind of problem.
+  Both stay searchable with `case_index.py search`.
 
 `index/pages/` is refreshed every time a case is indexed. It holds one
 Markdown page per case plus one per component, customer and product
