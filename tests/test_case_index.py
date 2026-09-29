@@ -83,6 +83,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("Export writes a page per case", sorted(p.name for p in (out / "cases").iterdir()) == ["CASE-1.md", "CASE-2.md", "CASE-3.md"])
     page = (out / "cases" / "CASE-1.md").read_text()
     check("Case page links concepts with wikilinks", "[[namenode|Namenode service]]" in page and "[[customer ACME]]" in page, page)
+    check("Product version is plain text, not a graph link", "[[version" not in page)
     check("Concepts in only one case stay plain text", "CORE server" in page and "[[core" not in page, page)
     nn = (out / "concepts" / "namenode.md").read_text()
     check("Concept page lists every case that involves it", "[[CASE-1]]" in nn and "[[CASE-2]]" in nn, nn)
@@ -218,6 +219,50 @@ with tempfile.TemporaryDirectory() as tmp:
     off = se.SyncEngine(slack, state, ["Completed"], case_index=idx)
     check("No summarizer → no indexing", off.indexing_for("CASE-4009") is False)
     os.environ.pop("CTC_LOG_DIR", None)
+
+# ---- similar past cases for a new ticket
+with tempfile.TemporaryDirectory() as tmp:
+    idx = ci.CaseIndex(Path(tmp) / "cases.jsonl")
+    idx.upsert(entry("CASE-10", title="High memory utilization on DN", components=["Datanode"], keywords=["high memory utilization"],
+                     fix="Reduced concurrent workbooks.", closed="2026-09-10"))
+    idx.upsert(entry("CASE-11", title="Console login fails", components=["Console"], keywords=["sso"]))
+    hits = ci.similar(idx, "ACME | High memory utilization\nNotable events on the datanode keep firing")
+    check("Shortlist finds the matching case", [h["ticket_id"] for h in hits] == ["CASE-10"], hits)
+    check("Stopwords and weak overlaps don't match", ci.similar(idx, "Please check the issue with the team") == [])
+    check("A ticket never matches itself", ci.similar(idx, "High memory utilization datanode", exclude="case-10") == [])
+
+    def picker(result):
+        def run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(
+                {"type": "result", "subtype": "success", "is_error": False, "result": result}), stderr="")
+        return sm.ClaudeCLISummarizer(workdir=Path(tmp), runner=run)
+    cand = ci.similar(idx, "High memory utilization datanode")
+    picks = picker('[{"ticket_id": "CASE-10", "why": "same DN memory symptom"}, {"ticket_id": "CASE-999", "why": "made up"}]').pick_related(
+        {"summary": "High memory"}, cand)
+    check("Claude's picks limited to the shortlist", picks == [{"ticket_id": "CASE-10", "why": "same DN memory symptom"}], picks)
+    check("Empty pick list allowed", picker("[]").pick_related({"summary": "x"}, cand) == [])
+    check("Garbage reply → None", picker("no idea").pick_related({"summary": "x"}, cand) in (None, []))
+
+    class PickSummarizer(FakeSummarizer):
+        def __init__(self, picks):
+            super().__init__(RES)
+            self.picks = picks
+        def pick_related(self, ticket, candidates):
+            return self.picks
+    slack = FakeSlack()
+    eng = se.SyncEngine(slack, se.ChannelState(Path(tmp) / "s.json"), [], summarizer=PickSummarizer(
+        [{"ticket_id": "CASE-10", "why": "same DN memory symptom"}]), case_index=idx)
+    t = {"ticket_id": "CASE-20", "summary": "ACME | High memory utilization", "description": "datanode alerts", "customer": "ACME"}
+    check("Related cases posted", eng.post_similar_cases(t, "CNEW") == "posted")
+    msg = slack.calls[-1][2]
+    check("Note lists case, reason and fix", "CASE-10" in msg and "same DN memory symptom" in msg and "Reduced concurrent workbooks." in msg, msg)
+    check("Note names no customer", "ACME" not in msg, msg)
+    none = se.SyncEngine(slack, se.ChannelState(Path(tmp) / "s2.json"), [], summarizer=PickSummarizer([]), case_index=idx)
+    before = len(slack.calls)
+    check("No good match → nothing posted", none.post_similar_cases(t, "CNEW") == "none" and len(slack.calls) == before)
+    off = se.SyncEngine(slack, se.ChannelState(Path(tmp) / "s3.json"), [], summarizer=PickSummarizer([]), case_index=idx,
+                        similar_cases=False)
+    check("similar_on_new can be switched off", off.similar_on_new is False)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

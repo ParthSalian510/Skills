@@ -87,6 +87,18 @@ Reply with only a JSON object, no code fence, with these keys:
 {ticket}
 </ticket>"""
 
+RELATED_PROMPT = """A new support ticket was opened. Below it are past closed cases that might be related. Pick at most 3 that are genuinely the same kind of problem (same component and symptom, or same root cause), so the engineer can learn from how they were fixed. Unrelated or only superficially similar cases must be left out; picking none is fine.
+
+Reply with only a JSON list, no code fence: [{{"ticket_id": "...", "why": "one short clause on what they share"}}], or [] if none.
+
+<ticket>
+New ticket:
+{ticket}
+
+Past cases:
+{cases}
+</ticket>"""
+
 UPDATE_PROMPT = """New public comments were added to this ticket. Write one to three "• " bullets saying what they add: new findings, actions taken, decisions, or what is needed next. If they add nothing of substance (only scheduling, pleasantries, "any update?"), reply with exactly {no_update}.
 
 <ticket>
@@ -170,6 +182,26 @@ class ClaudeCLISummarizer:
             values = data.get(field) if isinstance(data.get(field), list) else []
             out[field] = [v for v in (self._clean(str(x), names) for x in values[:cap]) if v]
         return out if out["problem"] else None
+
+    def pick_related(self, ticket: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Optional[List[Dict[str, str]]]:
+        """Claude's choice (≤3) from candidate past cases, each with a short reason; None if the call failed."""
+        new = (f"Title: {scrub(ticket.get('summary') or '')}\nDescription: {scrub(ticket.get('description') or '')}")
+        cases = "\n\n".join(f"{c['ticket_id']}: {scrub(c.get('title') or '')}\n  Problem: {c.get('problem')}\n"
+                             f"  Root cause: {c.get('root_cause')}\n  Fix: {c.get('fix')}" for c in candidates)
+        raw = self._ask(RELATED_PROMPT.format(ticket=new, cases=cases))
+        if raw is None:
+            return None
+        start, end = raw.find("["), raw.rfind("]")
+        try:
+            picks = json.loads(raw[start:end + 1]) if start >= 0 and end > start else []
+        except json.JSONDecodeError:
+            return None
+        allowed = {c["ticket_id"] for c in candidates}
+        out = []
+        for p in picks if isinstance(picks, list) else []:
+            if isinstance(p, dict) and p.get("ticket_id") in allowed and p["ticket_id"] not in {o["ticket_id"] for o in out}:
+                out.append({"ticket_id": p["ticket_id"], "why": scrub(str(p.get("why") or ""))[:160]})
+        return out[:3]
 
     def update(self, ticket: Dict[str, Any], new: List[Dict[str, Any]], earlier: List[Dict[str, Any]],
                text_of: Callable[[Any], str]) -> Optional[str]:

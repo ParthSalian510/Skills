@@ -26,7 +26,8 @@ What each file is for, and whether it runs for real:
 | `scripts/jira_poller.py` | Autonomous sync + `backfill`; systemd service `ctc-jira-poller` | Yes, test workspace |
 | `scripts/sync_engine.py` | Shared create/sync/archive/backfill logic and `state/channels.json` | Yes, test workspace |
 | `scripts/summarizer.py` | Comment → summary via `claude -p` (no names, scrubbed, tools off) | Yes, CASE-3997 and SR-4159 |
-| `scripts/case_index.py` | Index of closed cases (`index/cases.jsonl`, gitignored) + search CLI | Yes |
+| `scripts/case_index.py` | Index of closed cases (`index/cases.jsonl`, gitignored), search / related / similar, page export | Yes |
+| `scripts/rebuild_graph.py` | Nightly Graphify rebuild of `index/pages/` (timer `ctc-graph-rebuild`) | Yes |
 | `scripts/webhook_server.py` | Slack client, starter formatter, Jira-webhook receiver (queue + worker) | Client/formatter yes; webhook receiver built and tested but not connected (no Jira-side webhook) |
 | `scripts/ticket_sync.py` | Topic/emoji formatting (used by the sync engine); `TicketSyncManager` only *plans* actions | Formatting yes; manager no |
 | `scripts/audit_logger.py` | Writes one run record per run | Yes |
@@ -949,6 +950,30 @@ python3 scripts/case_index.py show CASE-4009 | list
 python3 scripts/case_index.py related CASE-4009                       # past cases sharing components / keywords
 python3 scripts/case_index.py export                                  # rebuild index/pages/ by hand
 ```
+
+**Similar past cases on new tickets** (`case_index.similar_on_new`): when
+the poller creates a channel for a new ticket, it shortlists past cases whose
+components, symptoms or title words appear in the new ticket (`similar()` in
+`case_index.py`). Claude then picks at most 3 that really share the problem,
+each with a one-line reason, and the channel gets a *Possibly related past
+cases* note with each case's fix.
+- If nothing matches well, nothing is posted.
+- Other customers' names are never included, because a channel may be
+  shared with its customer.
+
+**Case knowledge graph (Graphify).** `scripts/rebuild_graph.py` exports the
+pages, then runs `graphify extract` and `graphify cluster-only` through the
+Claude CLI backend. The output is `index/pages/graphify-out/`: `graph.json`,
+`GRAPH_REPORT.md` and an interactive `graph.html`.
+- A nightly timer, `ctc-graph-rebuild.timer` (02:30), rebuilds it only if
+  the index changed. Install it with `deploy/install-graph-rebuild.sh`. Use
+  `--force` for a full re-extract, and check `logs/graph.jsonl` for runs.
+- The graph is also the MCP server `case-graph` (user scope), so any Claude
+  Code session can query past cases with `query_graph`, `get_node`,
+  `get_neighbors` and `shortest_path`.
+- Requires `pipx install "graphifyy[mcp]"`.
+- Product versions are plain text on the pages, not graph nodes. Otherwise
+  they become hubs that link unrelated cases.
 
 `index/pages/` is refreshed every time a case is indexed. It holds one
 Markdown page per case plus one per component, customer and product

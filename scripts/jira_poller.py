@@ -84,12 +84,13 @@ class JiraClient:
 class Poller:
     def __init__(self, jira, messenger, state: ChannelState, projects: List[str], lookback_minutes: int,
                  archive_statuses: List[str], invite_user_ids=(), summarizer=None, summary_tickets=(),
-                 case_index=None, index_channel_name="case-index", index_tickets=("*",)):
+                 case_index=None, index_channel_name="case-index", index_tickets=("*",), similar_cases=True):
         self.jira, self.state = jira, state
         self.engine = SyncEngine(messenger, state, archive_statuses, invite_user_ids, summarizer=summarizer,
                                  fetch_comments=jira.get_comments if summarizer else None,
                                  summary_tickets=summary_tickets, case_index=case_index,
-                                 index_channel_name=index_channel_name, index_tickets=index_tickets)
+                                 index_channel_name=index_channel_name, index_tickets=index_tickets,
+                                 similar_cases=similar_cases)
         self.projects, self.lookback_minutes = projects, lookback_minutes
         self.failing = False
 
@@ -169,6 +170,7 @@ def build_poller(state_path: Path) -> "Poller":
         case_index=CaseIndex() if (cfg.get("case_index") or {}).get("enabled") else None,
         index_channel_name=(cfg.get("case_index") or {}).get("slack_channel", "case-index"),
         index_tickets=(cfg.get("case_index") or {}).get("tickets") or ["*"],
+        similar_cases=(cfg.get("case_index") or {}).get("similar_on_new", True),
     )
 
 

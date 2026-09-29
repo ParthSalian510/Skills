@@ -12,6 +12,7 @@ LOG_FILES = {
     "webhook": "webhook.jsonl",
     "poller": "poller.jsonl",
     "executor": "executor.jsonl",
+    "graph": "graph.jsonl",
     "test": "tests.jsonl",
 }
 MODES = ("live", "dry_run", "placeholder", "test")

@@ -231,6 +231,9 @@ tier_2:
       enabled: true
       slack_channel: case-index
       tickets: ["*"]            # closing tickets to index; one summary per case
+      # New ticket channels get up to 3 "possibly related past cases" from the
+      # index (shortlisted by keywords, checked by Claude; no customer names).
+      similar_on_new: true
 
     archive_on_status:
       - "Done"

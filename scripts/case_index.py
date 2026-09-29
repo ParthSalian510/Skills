@@ -132,6 +132,36 @@ def related(index: "CaseIndex", ticket_id: str, limit: int = 5) -> List[Dict[str
     return [e for _, _, e in ranked[:limit]]
 
 
+STOPWORDS = {"the", "and", "for", "not", "are", "was", "were", "with", "from", "this", "that", "have", "has", "been",
+             "able", "unable", "issue", "issues", "please", "kindly", "team", "check", "able", "into", "when", "there",
+             "some", "only", "also", "after", "before", "getting", "showing", "working", "error", "request", "case"}
+
+
+def _words(text: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9][a-z0-9.+-]{2,}", (text or "").lower()) if w not in STOPWORDS}
+
+
+def similar(index: "CaseIndex", text: str, exclude: str = "", limit: int = 8, min_score: int = 3) -> List[Dict[str, Any]]:
+    """Past cases that look like a new ticket (title + description), best first. Cheap and deterministic.
+
+    A case's component or keyword appearing in the text scores 3; each shared title word scores 1.
+    Used as the shortlist that Claude then checks, so it errs on the side of including.
+    """
+    norm = " " + re.sub(r"[^a-z0-9.+-]+", " ", (text or "").lower()) + " "
+    words = _words(text)
+    scored = []
+    for e in index.entries():
+        if e["ticket_id"] == exclude.upper():
+            continue
+        hits = [k for k in concepts_of(e) if len(k) > 2 and f" {k} " in norm]
+        overlap = words & _words(e.get("title"))
+        score = 3 * len(hits) + len(overlap)
+        if score >= min_score:
+            scored.append((score, e.get("closed") or "", {**e, "match": sorted(set(hits) | overlap)}))
+    scored.sort(key=lambda r: (r[0], r[1]), reverse=True)
+    return [e for _, _, e in scored[:limit]]
+
+
 def _page_name(text: str) -> str:
     return re.sub(r"[\\/:*?\"<>|#^\[\]]+", " ", text).strip()[:80] or "unnamed"
 
@@ -155,7 +185,11 @@ def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
             seen[key] = seen.get(key, 0) + 1
     for e in index.entries():
         links = []
-        for kind, value in (("customer", e.get("customer")), ("version", e.get("product_version"))):
+        # Versions stay plain text: nearly every case has one of a few versions, so as graph links they
+        # became the most-connected hubs and pulled unrelated cases into every query.
+        if e.get("product_version"):
+            links.append(f"version {e['product_version']}")
+        for kind, value in (("customer", e.get("customer")),):
             if value:
                 page = _page_name(f"{kind} {value}")
                 links.append(f"[[{page}]]")

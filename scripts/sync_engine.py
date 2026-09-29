@@ -94,7 +94,7 @@ def format_update_message(ticket: Dict[str, Any], changes: Dict[str, Dict[str, A
 class SyncEngine:
     def __init__(self, messenger, state: ChannelState, archive_statuses: List[str], invite_user_ids=(),
                  summarizer=None, fetch_comments=None, summary_tickets=(), case_index=None,
-                 index_channel_name: str = "case-index", index_tickets=("*",)):
+                 index_channel_name: str = "case-index", index_tickets=("*",), similar_cases: bool = True):
         """summarizer + fetch_comments(key) turn on comment summaries for summary_tickets ("*" = all tracked).
         With case_index too, closing a ticket in index_tickets posts a resolution summary and indexes the case."""
         self.messenger, self.state = messenger, state
@@ -103,6 +103,38 @@ class SyncEngine:
         self.summary_tickets = {k.upper() for k in summary_tickets}
         self.case_index, self.index_channel_name = case_index, index_channel_name
         self.index_tickets = {k.upper() for k in index_tickets}
+        self.similar_cases = similar_cases
+
+    @property
+    def similar_on_new(self) -> bool:
+        return bool(self.summarizer and self.case_index is not None and self.similar_cases)
+
+    def post_similar_cases(self, ticket: Dict[str, Any], channel_id: str) -> str:
+        """Post up to 3 related past cases (checked by Claude) in a new ticket's channel.
+
+        Returns "posted", "none" (no good match, nothing posted) or "failed". Other customers' names are
+        left out on purpose: a ticket channel may one day be shared with that customer.
+        """
+        from case_index import similar
+        candidates = similar(self.case_index, f"{ticket.get('summary')}\n{ticket.get('description')}",
+                             exclude=ticket.get("ticket_id") or "")
+        if not candidates:
+            return "none"
+        picks = self.summarizer.pick_related(ticket, candidates)
+        if picks is None:
+            return "failed"
+        if not picks:
+            return "none"
+        by_id = {c["ticket_id"]: c for c in candidates}
+        lines = ["*Possibly related past cases* · picked from #case-index, check before relying on them"]
+        for p in picks:
+            c = by_id[p["ticket_id"]]
+            ref = f"<{c['jira_url']}|{c['ticket_id']}>" if c.get("jira_url") else c["ticket_id"]
+            fix = (c.get("fix") or "Not recorded").strip()
+            fix = fix if len(fix) <= 220 else fix[:220].rsplit(" ", 1)[0] + "…"
+            lines.append(f"• {ref} · closed {(c.get('closed') or '?')[:10]} — {_slack_escape(p['why'] or c.get('title') or '')}\n"
+                         f"   _Fix:_ {_slack_escape(fix)}")
+        return "posted" if self.messenger.post_message(channel_id, "\n".join(lines)) else "failed"
 
     def indexing_for(self, key: str) -> bool:
         return bool(self.summarizer and self.fetch_comments and self.case_index is not None and
@@ -352,6 +384,11 @@ class SyncEngine:
     def _provision(self, ticket: Dict[str, Any], source: str) -> str:
         run = self._run(ticket, source)
         result = provision_channel(self.messenger, ticket, self.invite_user_ids, run)
+        if result["channel_id"] and self.similar_on_new:
+            t = time.time()
+            outcome = self.post_similar_cases(ticket, result["channel_id"])
+            run.record_step(5, "Similar past cases", "success" if outcome in ("posted", "none") else "failure",
+                            time.time() - t, details={"outcome": outcome})
         run.finalize(result["channel_name"], result["final_status"])
         if result["channel_id"] or result["final_status"] == "skipped":
             # Remember already-existing channels too, so they aren't retried on every event.

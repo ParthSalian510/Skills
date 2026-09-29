@@ -1,0 +1,11 @@
+# Runs the rebuild at 02:30 every night; Persistent catches up after the machine was off.
+[Unit]
+Description=Nightly case graph rebuild
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target
