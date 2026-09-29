@@ -119,6 +119,22 @@ with tempfile.TemporaryDirectory() as tmp:
     counts = poller.poll_once()
     check("Unchanged ticket does nothing", slack.calls == [] and counts.get("unchanged") == 1, (counts, slack.calls))
 
+    # A ticket waiting to retry a failed summary is fetched even when Jira shows no new update.
+    with state.locked():
+        state.tickets["CASE-4020"]["summary_failing_since"] = 1.0
+    jira.issues, jira.queries = [], []
+    poller.poll_once()
+    check("Pending summary retry fetched by key", jira.queries[-1] == "key in (CASE-4020)", jira.queries)
+    jira.issues, jira.queries = [issue("CASE-4020", now + timedelta(seconds=5))], []
+    poller.poll_once()
+    check("No extra query when the ticket is already in the window", len(jira.queries) == 1, jira.queries)
+    with state.locked():
+        state.tickets["CASE-4020"].pop("summary_failing_since")
+    jira.queries = []
+    poller.poll_once()
+    check("No retry query when nothing is pending", len(jira.queries) == 1, jira.queries)
+    slack.calls.clear()
+
     # Priority change: topic + update message, no archive.
     jira.issues = [issue("CASE-4020", now + timedelta(seconds=5), priority="P1")]
     counts = poller.poll_once()

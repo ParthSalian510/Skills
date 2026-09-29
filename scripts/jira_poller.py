@@ -108,7 +108,14 @@ class Poller:
         polled_at = utcnow().isoformat()
         with self.state.locked():
             jql = self.jql()
+            retry = sorted(k for k, t in self.state.tickets.items()
+                           if t.get("summary_failing_since") and not t.get("archived"))
         issues = self.jira.search(jql, JIRA_FIELDS)
+        # A ticket whose comment summary failed has no new Jira update to bring it back into the window,
+        # so fetch it explicitly until the retry succeeds or gives up.
+        missing = [k for k in retry if k not in {i.get("key") for i in issues}]
+        if missing:
+            issues += self.jira.search(f'key in ({", ".join(missing)})', JIRA_FIELDS)
         counts: Dict[str, int] = {}
         for issue in issues:
             outcome = self.engine.process(issue, source="poller")
