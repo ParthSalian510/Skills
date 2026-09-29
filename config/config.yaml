@@ -244,6 +244,7 @@ tier_2:
       - "Cancelled"
       - "Declined"
       - "Failed"
+      - "Archived"
 
     # Status-specific actions
     status_actions:

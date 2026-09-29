@@ -151,9 +151,28 @@ with tempfile.TemporaryDirectory() as tmp:
 
     fake.update_result = None
     jira_comments.append(c(106, text="SECRET raw text"))
-    check("Summary failure → fallback note", eng.process(issue(), "poller") == "failed")
+    posts_before = len(slack.posts)
+    check("Summary failure → nothing posted, retried next poll", eng.process(issue(), "poller") == "summary_retry"
+          and len(slack.posts) == posts_before)
+    check("Cursor stays put while retrying", state.tickets["CASE-3997"]["last_comment_id"] == 105
+          and "summary_failing_since" in state.tickets["CASE-3997"])
+    fake.update_result = "• Recovered summary"
+    check("Retry succeeds once the summarizer is back", eng.process(issue(), "poller") == "summarized"
+          and "Recovered summary" in slack.posts[-1][1])
+    check("Success moves the cursor and clears the failure clock", state.tickets["CASE-3997"]["last_comment_id"] == 106
+          and "summary_failing_since" not in state.tickets["CASE-3997"])
+    fake.update_result = None
+    jira_comments.append(c(1061, text="SECRET raw text"))
+    eng.process(issue(), "poller")
+    with state.locked():
+        state.tickets["CASE-3997"]["summary_failing_since"] -= se.SUMMARY_RETRY_SECONDS + 1
+    check("Still failing after the retry window → fallback note", eng.process(issue(), "poller") == "failed")
     check("Fallback never copies comment text", "SECRET" not in slack.posts[-1][1] and "Summary unavailable" in slack.posts[-1][1])
-    check("Cursor advances even on failure", state.tickets["CASE-3997"]["last_comment_id"] == 106)
+    check("Cursor moves on after the fallback", state.tickets["CASE-3997"]["last_comment_id"] == 1061
+          and "summary_failing_since" not in state.tickets["CASE-3997"])
+    jira_comments.pop()  # back to comments 101–106 for the tests below
+    with state.locked():
+        state.tickets["CASE-3997"]["last_comment_id"] = 106
 
     fake.update_result = "• Status note"
     jira_comments.append(c(107))
@@ -187,7 +206,7 @@ with tempfile.TemporaryDirectory() as tmp:
     plan = bf.backfill(issue(), changelog, [c(1), c(2, public=False), c(3)], dry_run=True)
     check("Backfill header is the case summary", plan["header"].startswith("*Case summary · CASE-3997* · from 2 public comments")
           and "*Problem:* Memory" in plan["header"], plan["header"])
-    check("Backfill thread has only field changes", plan["timeline"] == ["*04 Sep 10:00* · P — Status: Open → Pending"], plan["timeline"])
+    check("Backfill thread has only field changes", plan["timeline"] == ["*04 Sep 10:00* · Status: Open → Pending"], plan["timeline"])
     os.environ.pop("CTC_LOG_DIR", None)
 
 print(f"\n{passed} passed, {failed} failed")

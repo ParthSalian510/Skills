@@ -75,8 +75,10 @@ check("Internal notes excluded", all("internal note" not in e.get("text", "") fo
 check("Untracked fields ignored", all(f in se.TRACKED_FIELDS for e in tl if e["kind"] == "change" for f, _, _ in e["changes"]))
 check("Chronological order", [e["at"] for e in tl] == sorted(e["at"] for e in tl))
 check("6 events (4 changes + 2 public comments)", len(tl) == 6, len(tl))
-check("Author and text escaped for Slack", "Casey &lt;K&gt;" in se.format_event(tl[-2]) and "&amp;" in se.format_event(tl[-2]), se.format_event(tl[-2]))
-check("Change line format", se.format_event(tl[0]) == "*21 Sep 16:32* · Automation for Jira — Priority: P1 → P3", se.format_event(tl[0]))
+check("Comment shows the author's role, not their name, and is escaped for Slack",
+      "Casey" not in se.format_event(tl[-2]) and ("*Support*" in se.format_event(tl[-2]) or "*Customer*" in se.format_event(tl[-2]))
+      and "&amp;" in se.format_event(tl[-2]), se.format_event(tl[-2]))
+check("Change line names no one", se.format_event(tl[0]) == "*21 Sep 16:32* · Priority: P1 → P3", se.format_event(tl[0]))
 
 # N3: Automation's first-seconds changes belong to the opening state (real CASE-4009 pattern).
 created = se.parse_jira_time("2026-09-21T16:32:19.229+0530")
@@ -87,7 +89,7 @@ check("Automation change within 60 s kept in opening state",
 check("Human changes still undone", se.opening_snapshot(current, auto, created)["status"] == "Open")
 tl_auto = se.build_timeline(auto, comments, created)
 check("Opening Automation change not listed in history", len(tl_auto) == 5 and
-      not any(e["kind"] == "change" and e["who"] == "Automation for Jira" for e in tl_auto), len(tl_auto))
+      not any("Automation for Jira" in se.format_event(e) for e in tl_auto), len(tl_auto))
 late = [dict(e) for e in auto]
 late[0] = {**late[0], "created": "2026-09-21T16:40:00.000+0530"}
 check("Automation change after the window is history, not opening",

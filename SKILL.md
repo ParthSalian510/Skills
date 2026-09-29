@@ -916,8 +916,11 @@ next.
   meeting details. Authors reach the model only as "Customer" or "Support",
   and contact and meeting details are scrubbed before and after the model runs.
 - Scheduling-only comments ("please join the call") produce no post.
-- If Claude can't be reached, the note says "Summary unavailable, see Jira"
-  rather than copying the comments.
+- If Claude can't be reached (for example, the plan's usage limit), nothing
+  is posted and the next poll retries. Only after an hour of failures does the
+  note say "Summary unavailable, see Jira", never copying the comments.
+- Backfilled history names no one: field changes show only what changed, and
+  comments show the author's role (Customer or Support).
 - The first time a ticket is seen, only the comment cursor is recorded, so
   old history is never dumped into a channel.
 - It runs the Claude Code CLI (`claude -p`) under this machine's login. No
@@ -1013,7 +1016,7 @@ The topic's colour follows one meaning across CASE and SR:
 - ⏳ waiting on the customer or an approval
 - 🔴 escalated
 - 🟢 done
-- ⚫ ended (closed, cancelled, declined or failed)
+- ⚫ ended (closed, cancelled, declined, failed or archived)
 - ⚪ an unmapped status
 
 The mapping is in `format_status_emoji` in `ticket_sync.py`.

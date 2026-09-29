@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from audit_logger import AuditLogger
+from summarizer import role_of
 from ticket_sync import StateChangeDetector
 from webhook_server import WebhookValidator, provision_channel
 
@@ -89,6 +90,10 @@ def format_update_message(ticket: Dict[str, Any], changes: Dict[str, Dict[str, A
     if ticket.get("url"):
         lines.append(f"<{ticket['url']}|Open in Jira>")
     return "\n".join(lines)
+
+
+# How long to keep retrying a failed comment summary before posting a "see Jira" note instead.
+SUMMARY_RETRY_SECONDS = 3600
 
 
 class SyncEngine:
@@ -178,8 +183,10 @@ class SyncEngine:
         """Post a summary of public comments added since the last one seen. Caller holds the state lock.
 
         The first time a ticket is seen, only the cursor (highest comment id) is recorded, so switching this
-        on never floods a channel with old history. The cursor always advances, even when the summary fails,
-        so a broken summarizer can't re-post the same comments every minute.
+        on never floods a channel with old history. When the summary fails (e.g. a Claude plan usage limit),
+        nothing is posted and the cursor stays put, so the next poll retries. Only after SUMMARY_RETRY_SECONDS
+        of failures is a short "see Jira" note posted and the cursor moved on, so a broken summarizer can't
+        hold a ticket back for ever or post every minute.
         """
         key, channel_id = ticket["ticket_id"], tracked["channel_id"]
         comments = self.fetch_comments(key)
@@ -190,13 +197,24 @@ class SyncEngine:
         last = int(tracked["last_comment_id"])
         public = [c for c in comments if c.get("jsdPublic") is not False and str(c.get("id", "")).isdigit()]
         new = [c for c in public if int(c["id"]) > last]
-        tracked["last_comment_id"] = max(newest, last)
         if not new:
+            tracked["last_comment_id"] = max(newest, last)
+            tracked.pop("summary_failing_since", None)
             return None
         run = self._run(ticket, source)
         t = time.time()
         body = self.summarizer.update(ticket, new, [c for c in public if int(c["id"]) <= last], clean_comment)
         n = f"{len(new)} new public comment{'s' if len(new) != 1 else ''}"
+        if body is None:
+            since = tracked.setdefault("summary_failing_since", time.time())
+            if time.time() - since < SUMMARY_RETRY_SECONDS:
+                run.record_step(1, "Summarise comments", "failure", time.time() - t,
+                                details={"comments": len(new), "retry": "next poll"})
+                run.finalize(tracked.get("channel_name"), "failure")
+                logger.warning(f"[{source}] summary of {n} on {key} failed; retrying next poll")
+                return "summary_retry"
+        tracked["last_comment_id"] = max(newest, last)
+        tracked.pop("summary_failing_since", None)
         if body == "":
             run.record_step(1, "Summarise comments", "skipped", time.time() - t,
                             details={"comments": len(new), "reason": "nothing of substance"})
@@ -534,13 +552,12 @@ def build_timeline(changelog: List[Dict[str, Any]], comments: List[Dict[str, Any
                     _value(HISTORY_FIELDS[i["field"]], i.get("toString")))
                    for i in entry.get("items", []) if i.get("field") in HISTORY_FIELDS]
         if changes:
-            events.append({"at": parse_jira_time(entry["created"]), "kind": "change",
-                           "who": (entry.get("author") or {}).get("displayName", "Jira"), "changes": changes})
+            events.append({"at": parse_jira_time(entry["created"]), "kind": "change", "changes": changes})
     for c in comments:
         if c.get("jsdPublic") is False:
             continue
         events.append({"at": parse_jira_time(c["created"]), "kind": "comment",
-                       "who": (c.get("author") or {}).get("displayName", "Unknown"), "text": clean_comment(c.get("body"))})
+                       "who": role_of(c), "text": clean_comment(c.get("body"))})
     return sorted(events, key=lambda e: e["at"])
 
 
@@ -582,10 +599,10 @@ def case_summary_message(ticket: Dict[str, Any], summary: Optional[str], public:
 
 
 def format_event(event: Dict[str, Any]) -> str:
+    """One thread line. No people's names: a change shows only what changed, a comment only the author's role."""
     when = event["at"].strftime("%d %b %H:%M")
-    who = _slack_escape(event["who"])
     if event["kind"] == "change":
         parts = "; ".join(f"{FIELD_LABELS[f]}: {_slack_escape(o or 'Not set')} → {_slack_escape(n or 'Not set')}"
                           for f, o, n in event["changes"])
-        return f"*{when}* · {who} — {parts}"
-    return f"*{when}* · :speech_balloon: *{who}*\n{_slack_escape(event['text'])}"
+        return f"*{when}* · {parts}"
+    return f"*{when}* · :speech_balloon: *{_slack_escape(event['who'])}*\n{_slack_escape(event['text'])}"
