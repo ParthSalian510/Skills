@@ -236,6 +236,11 @@ class SyncEngine:
             return {"outcome": "dry_run", "ticket_id": key, "entry": entry,
                     "message": format_index_message(entry)}
         replaced = self.case_index.upsert(entry)
+        try:  # keep the Markdown pages (index/pages/) in step with the index; never blocks indexing
+            from case_index import export_pages
+            export_pages(self.case_index, self.case_index.path.parent / "pages")
+        except Exception as e:
+            logger.error(f"Case pages not refreshed: {e}")
         posted_index = posted_channel = False
         cid = self.index_channel_id()
         if cid:

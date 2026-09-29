@@ -25,7 +25,7 @@ What each file is for, and whether it runs for real:
 | `scripts/run_log.py` | Run-log paths, the Step 6 CLI, and `lookup` for Step 3 | Yes |
 | `scripts/jira_poller.py` | Autonomous sync + `backfill`; systemd service `ctc-jira-poller` | Yes, test workspace |
 | `scripts/sync_engine.py` | Shared create/sync/archive/backfill logic and `state/channels.json` | Yes, test workspace |
-| `scripts/summarizer.py` | Comment → summary via `claude -p` (no names, scrubbed, tools off) | Yes, CASE-3997 only |
+| `scripts/summarizer.py` | Comment → summary via `claude -p` (no names, scrubbed, tools off) | Yes, CASE-3997 and SR-4159 |
 | `scripts/case_index.py` | Index of closed cases (`index/cases.jsonl`, gitignored) + search CLI | Yes |
 | `scripts/webhook_server.py` | Slack client, starter formatter, Jira-webhook receiver (queue + worker) | Client/formatter yes; webhook receiver built and tested but not connected (no Jira-side webhook) |
 | `scripts/ticket_sync.py` | Topic/emoji formatting (used by the sync engine); `TicketSyncManager` only *plans* actions | Formatting yes; manager no |
@@ -946,7 +946,15 @@ python3 scripts/jira_poller.py index CASE-4009 [CASE-…] [--dry-run]   # index 
 python3 scripts/jira_poller.py index-channel C0123ABCD                # use an existing channel as #case-index
 python3 scripts/case_index.py search "namenode oom"                   # best matches first
 python3 scripts/case_index.py show CASE-4009 | list
+python3 scripts/case_index.py related CASE-4009                       # past cases sharing components / keywords
+python3 scripts/case_index.py export                                  # rebuild index/pages/ by hand
 ```
+
+`index/pages/` is refreshed every time a case is indexed. It holds one
+Markdown page per case plus one per component, customer and product
+version, joined with `[[wikilinks]]`, so it opens as a linked graph in
+Obsidian or any Markdown viewer. It is also ready to feed a graph tool
+such as Graphify, which is not installed on this machine yet.
 
 After changing code or config, restart the service (`systemctl --user
 restart ctc-jira-poller`) **before** running these commands. A service still
@@ -970,6 +978,18 @@ after Slack's/Jira's `Retry-After` (capped at 30 s). Server errors and dropped
 connections are retried only for reads, never for posts, so a slow Slack
 can't cause a duplicate message. If the bot has been removed from a channel,
 it rejoins and retries once.
+
+The topic's colour follows one meaning across CASE and SR:
+- 🟠 needs support
+- 🟡 review or planning
+- 🔵 being worked
+- ⏳ waiting on the customer or an approval
+- 🔴 escalated
+- 🟢 done
+- ⚫ ended (closed, cancelled, declined or failed)
+- ⚪ an unmapped status
+
+The mapping is in `format_status_emoji` in `ticket_sync.py`.
 
 State (ticket → channel ID, last-seen fields, last poll time) lives in
 `state/channels.json`; after downtime the lookback widens to cover the gap.

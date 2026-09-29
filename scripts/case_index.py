@@ -8,6 +8,8 @@ replaces its entry, so the file has at most one line per ticket.
     python3 scripts/case_index.py search "namenode oom"      # best matches first
     python3 scripts/case_index.py show CASE-4009
     python3 scripts/case_index.py list
+    python3 scripts/case_index.py related CASE-4009     # past cases sharing components / keywords
+    python3 scripts/case_index.py export                # Markdown pages with [[wikilinks]] → index/pages/
 """
 import argparse
 import fcntl
@@ -85,6 +87,102 @@ class CaseIndex:
         return [e for _, _, e in scored[:limit]]
 
 
+_SUFFIXES = re.compile(r"\b(servers?|services?|process(es)?|nodes?)\b$")
+
+
+def concept(name: str) -> str:
+    """Normalised concept key so "Namenode service" and "NameNode" meet: lowercase, no trailing server/service."""
+    key = re.sub(r"\s*\(.*?\)", "", name.lower()).strip()
+    key = _SUFFIXES.sub("", key).strip(" -_")
+    key = re.sub(r"[^a-z0-9.+-]+", " ", key).strip()
+    words = key.split()
+    if words and len(words[-1]) > 4 and words[-1].endswith("s") and not words[-1].endswith("ss"):
+        # plural → singular ("queries" → "query"), but leave short words/acronyms (EPS, DNS) alone
+        words[-1] = words[-1][:-3] + "y" if words[-1].endswith("ies") else words[-1][:-1]
+    return " ".join(words)
+
+
+def concepts_of(e: Dict[str, Any]) -> Dict[str, str]:
+    """concept key → display name, from components and keywords."""
+    out: Dict[str, str] = {}
+    for name in (e.get("components") or []) + (e.get("keywords") or []):
+        k = concept(str(name))
+        if k and k not in out:
+            out[k] = str(name)
+    return out
+
+
+def related(index: "CaseIndex", ticket_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Other cases ranked by shared concepts (components count double), then recency."""
+    target = index.get(ticket_id)
+    if not target:
+        return []
+    comps = {concept(c) for c in target.get("components") or []}
+    mine = set(concepts_of(target))
+    ranked = []
+    for e in index.entries():
+        if e["ticket_id"] == target["ticket_id"]:
+            continue
+        theirs = set(concepts_of(e))
+        shared = mine & theirs
+        if shared:
+            score = len(shared) + len(shared & comps & {concept(c) for c in e.get("components") or []})
+            ranked.append((score, e.get("closed") or "", {**e, "shared": sorted(shared)}))
+    ranked.sort(key=lambda r: (r[0], r[1]), reverse=True)
+    return [e for _, _, e in ranked[:limit]]
+
+
+def _page_name(text: str) -> str:
+    return re.sub(r"[\\/:*?\"<>|#^\[\]]+", " ", text).strip()[:80] or "unnamed"
+
+
+def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
+    """One Markdown page per case plus one per component/customer/version, linked with [[wikilinks]].
+
+    Readable as-is (Obsidian, any Markdown viewer), and the input for a graph tool.
+    Rewritten from scratch each time, so it always matches the index.
+    """
+    import shutil
+    for sub in ("cases", "concepts"):  # only our own folders: graphify-out/ etc. next to them survive
+        if (out_dir / sub).exists():
+            shutil.rmtree(out_dir / sub)
+        (out_dir / sub).mkdir(parents=True)
+    concept_cases: Dict[str, List[str]] = {}
+    names: Dict[str, str] = {}
+    seen: Dict[str, int] = {}
+    for e in index.entries():
+        for key in concepts_of(e):
+            seen[key] = seen.get(key, 0) + 1
+    for e in index.entries():
+        links = []
+        for kind, value in (("customer", e.get("customer")), ("version", e.get("product_version"))):
+            if value:
+                page = _page_name(f"{kind} {value}")
+                links.append(f"[[{page}]]")
+                concept_cases.setdefault(page, []).append(e["ticket_id"])
+                names[page] = f"{kind.title()}: {value}"
+        comp_links = []
+        for key, display in concepts_of(e).items():
+            if seen[key] < 2:  # only concepts shared by several cases get a page; the rest stay plain text
+                comp_links.append(display)
+                continue
+            page = _page_name(key)
+            concept_cases.setdefault(page, []).append(e["ticket_id"])
+            names.setdefault(page, display)
+            comp_links.append(f"[[{page}|{display}]]")
+        body = [f"# {e['ticket_id']} · {e.get('title') or ''}", "",
+                f"Closed {(e.get('closed') or '?')[:10]} · priority {e.get('priority') or '?'} · " + " · ".join(links), "",
+                f"**Problem:** {e.get('problem') or '-'}", "", f"**Root cause:** {e.get('root_cause') or '-'}", "",
+                f"**Fix:** {e.get('fix') or '-'}", "", "**Involves:** " + (", ".join(comp_links) or "-")]
+        if e.get("jira_url"):
+            body += ["", f"[Open in Jira]({e['jira_url']})"]
+        (out_dir / "cases" / f"{e['ticket_id']}.md").write_text("\n".join(body) + "\n")
+    for page, cases in concept_cases.items():
+        lines = [f"# {names[page]}", "", "Cases:"] + [f"- [[{c}]]" for c in sorted(set(cases), reverse=True)]
+        (out_dir / "concepts" / f"{page}.md").write_text("\n".join(lines) + "\n")
+    return {"cases": len(index.entries()), "concepts": len(concept_cases)}
+
+
 def format_entry(e: Dict[str, Any]) -> str:
     """Plain-text view for the CLI."""
     lines = [f"{e['ticket_id']} · {e.get('customer') or '?'} · {e.get('product_version') or 'no version'} · "
@@ -110,6 +208,11 @@ def main(argv=None) -> int:
     sh = sub.add_parser("show")
     sh.add_argument("ticket_id")
     sub.add_parser("list")
+    rl = sub.add_parser("related")
+    rl.add_argument("ticket_id")
+    rl.add_argument("--limit", type=int, default=5)
+    ex = sub.add_parser("export")
+    ex.add_argument("--out", default=str(DEFAULT_INDEX_PATH.parent / "pages"))
     args = p.parse_args(argv)
     index = CaseIndex(Path(args.index))
     if args.cmd == "search":
@@ -119,6 +222,19 @@ def main(argv=None) -> int:
         e = index.get(args.ticket_id)
         print(format_entry(e) if e else f"{args.ticket_id.upper()} is not in the index.")
         return 0 if e else 1
+    elif args.cmd == "related":
+        hits = related(index, args.ticket_id, args.limit)
+        if not index.get(args.ticket_id):
+            print(f"{args.ticket_id.upper()} is not in the index.")
+            return 1
+        for e in hits:
+            print(f"{e['ticket_id']:<11} {(e.get('closed') or '')[:10]}  shares: {', '.join(e['shared'])}\n"
+                  f"            {e.get('title') or ''}")
+        if not hits:
+            print("No related cases yet.")
+    elif args.cmd == "export":
+        counts = export_pages(index, Path(args.out))
+        print(f"Wrote {counts['cases']} case pages and {counts['concepts']} concept pages to {args.out}")
     else:
         for e in index.entries():
             print(f"{e['ticket_id']:<11} {(e.get('closed') or '')[:10]}  {e.get('customer') or '?':<14} {e.get('title') or ''}")

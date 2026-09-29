@@ -70,21 +70,18 @@ class StateChangeDetector:
     @staticmethod
     def format_status_emoji(status: str) -> str:
         """Get emoji for ticket status."""
-        emoji_map = {
-            # CASE project workflow
-            "Pending": "⏳",
-            "Under review": "🟡",
-            "Under investigation": "🔵",
-            "SAAS ESCL": "🔴",
-            "Completed": "🟢",
-            # Generic workflows
-            "Open": "🟠",
-            "In Progress": "🔵",
-            "In Review": "🟡",
-            "Done": "🟢",
-            "Resolved": "🟢",
-            "Closed": "⚫",
+        # One meaning per colour across the CASE and SR workflows (statuses read from Jira, 29 Sep 2026).
+        groups = {
+            "🟠": ["Open", "Waiting for support"],                                   # needs support's attention
+            "🟡": ["Under review", "Review", "In Review", "Planning"],                # in review / planning
+            "🔵": ["In Progress", "Work in progress", "Under investigation", "Implementing"],  # being worked
+            "⏳": ["Pending", "Waiting for customer", "Waiting for approval", "Authorize",
+                   "Awaiting implementation"],                                       # waiting on someone else
+            "🔴": ["Escalated", "PS ESCL", "EN ESCL", "SAAS ESCL", "SME ESCL"],       # escalated
+            "🟢": ["Completed", "Resolved", "Done"],                                 # done
+            "⚫": ["Closed", "Cancelled", "Declined", "Failed", "Archived"],          # ended
         }
+        emoji_map = {name: emoji for emoji, names in groups.items() for name in names}
         return emoji_map.get(status, "⚪")
 
     @staticmethod

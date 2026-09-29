@@ -203,6 +203,7 @@ tier_2:
     # unless registered with `jira_poller.py track`.
     polling_projects:
       - CASE
+      - SR
 
     # What to sync from Jira to Slack
     sync_status: true       # Update channel topic with status
@@ -216,7 +217,7 @@ tier_2:
     # settings and skills disabled. No names, contact or meeting details.
     summaries:
       enabled: true
-      tickets: [CASE-3997]      # tracked tickets to summarise; "*" = all
+      tickets: [CASE-3997, SR-4159]   # tracked tickets to summarise; "*" = all
       model: claude-opus-5-5
       timeout_seconds: 180
       # claude_path: /home/<user>/.local/bin/claude   # default: found on PATH
@@ -236,6 +237,10 @@ tier_2:
       - "Resolved"
       - "Completed"
       - "Closed"
+      # SR's other terminal statuses
+      - "Cancelled"
+      - "Declined"
+      - "Failed"
 
     # Status-specific actions
     status_actions:

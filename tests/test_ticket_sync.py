@@ -292,6 +292,15 @@ except Exception as e:
     failed += 1
     print(f"✗ Sync stats test failed: {e}")
 
+# Status colours for the real CASE and SR workflows
+emoji = StateChangeDetector.format_status_emoji
+check("Needs support → orange", emoji("Waiting for support") == emoji("Open") == "🟠")
+check("Waiting on someone else → hourglass", {emoji(s) for s in ("Waiting for customer", "Waiting for approval", "Pending")} == {"⏳"})
+check("Every escalation → red", {emoji(s) for s in ("Escalated", "PS ESCL", "EN ESCL", "SAAS ESCL", "SME ESCL")} == {"🔴"})
+check("Being worked → blue", {emoji(s) for s in ("In Progress", "Work in progress", "Under investigation", "Implementing")} == {"🔵"})
+check("Done vs ended", emoji("Completed") == emoji("Resolved") == "🟢" and {emoji(s) for s in ("Closed", "Cancelled", "Declined", "Failed")} == {"⚫"})
+check("Unknown status → white", emoji("Something new") == "⚪")
+
 # Summary
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

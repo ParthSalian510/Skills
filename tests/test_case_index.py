@@ -62,6 +62,36 @@ with tempfile.TemporaryDirectory() as tmp:
                           "show", "CASE-1"], capture_output=True, text=True)
     check("CLI show of unknown ticket → exit 1", out.returncode == 1)
 
+# ---- related cases and Markdown export
+with tempfile.TemporaryDirectory() as tmp:
+    idx = ci.CaseIndex(Path(tmp) / "cases.jsonl")
+    idx.upsert(entry("CASE-1", title="Adapters offline", customer="ACME", components=["Namenode service", "CORE server"],
+                     keywords=["oom killer"], closed="2026-09-28"))
+    idx.upsert(entry("CASE-2", title="Datanode memory", customer="Beta", components=["NameNode"], keywords=["oom killer"],
+                     closed="2026-09-20"))
+    idx.upsert(entry("CASE-3", title="Login broken", customer="ACME", components=["Console"], keywords=["sso"]))
+    check("Concept keys normalise names", ci.concept("Namenode service") == ci.concept("NameNode") == "namenode"
+          and ci.concept("Adapter queues") == "adapter queue" and ci.concept("Falcon Sensor (CrowdStrike)") == "falcon sensor"
+          and ci.concept("High EPS") == "high eps" and ci.concept("Slow queries") == "slow query")
+    rel = ci.related(idx, "CASE-1")
+    check("Related finds cases sharing components/keywords", [e["ticket_id"] for e in rel] == ["CASE-2"]
+          and rel[0]["shared"] == ["namenode", "oom killer"], rel)
+    check("Unrelated case not listed", all(e["ticket_id"] != "CASE-3" for e in rel))
+    check("Unknown ticket → no related", ci.related(idx, "CASE-9") == [])
+    out = Path(tmp) / "pages"
+    counts = ci.export_pages(idx, out)
+    check("Export writes a page per case", sorted(p.name for p in (out / "cases").iterdir()) == ["CASE-1.md", "CASE-2.md", "CASE-3.md"])
+    page = (out / "cases" / "CASE-1.md").read_text()
+    check("Case page links concepts with wikilinks", "[[namenode|Namenode service]]" in page and "[[customer ACME]]" in page, page)
+    check("Concepts in only one case stay plain text", "CORE server" in page and "[[core" not in page, page)
+    nn = (out / "concepts" / "namenode.md").read_text()
+    check("Concept page lists every case that involves it", "[[CASE-1]]" in nn and "[[CASE-2]]" in nn, nn)
+    (out / "graphify-out").mkdir()
+    (out / "graphify-out" / "graph.json").write_text("{}")
+    ci.export_pages(idx, out)
+    check("Re-export keeps graph tool output next to the pages", (out / "graphify-out" / "graph.json").exists())
+    check("Re-export replaces, never accumulates", len(list((out / "cases").iterdir())) == 3 and counts["cases"] == 3)
+
 check("index/ is gitignored", "index/" in (ROOT / ".gitignore").read_text())
 
 # ---- resolution summary parsing

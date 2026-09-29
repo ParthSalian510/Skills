@@ -35,10 +35,11 @@ class JiraClient:
         self.base_url = base_url.rstrip("/")
         self.auth = (email, api_token)
 
-    def search(self, jql: str, fields: List[str]) -> List[Dict[str, Any]]:
+    def search(self, jql: str, fields: List[str], limit: int = 0) -> List[Dict[str, Any]]:
+        """All matching issues, or at most `limit` of them."""
         issues, page_token = [], None
         while True:
-            body = {"jql": jql, "fields": fields, "maxResults": 100}
+            body = {"jql": jql, "fields": fields, "maxResults": min(100, limit) if limit else 100}
             if page_token:
                 body["nextPageToken"] = page_token
             response = request_with_retry("POST", f"{self.base_url}/rest/api/3/search/jql", idempotent=True,
@@ -47,6 +48,8 @@ class JiraClient:
             data = response.json()
             issues.extend(data.get("issues", []))
             page_token = data.get("nextPageToken")
+            if limit and len(issues) >= limit:
+                return issues[:limit]
             if not page_token or data.get("isLast") is True:
                 return issues
 
