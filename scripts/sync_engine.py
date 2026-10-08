@@ -383,18 +383,28 @@ class SyncEngine:
             run.record_step(6, "Apply current state", "success" if topic_ok and summary_ok else "failure",
                             time.time() - t, details={"topic": topic})
 
+            tracked = {"channel_id": channel_id, "channel_name": result["channel_name"], "archived": False, **current,
+                       "last_comment_id": max((int(c["id"]) for c in comments if str(c.get("id", "")).isdigit()),
+                                              default=0)}
+            closing = StateChangeDetector.should_archive(ticket.get("status") or "", self.archive_statuses)
+            indexed = None
+            if closing and self.indexing_for(key):
+                # Same as a live closure: resolution summary → index + #case-index, posted before archiving.
+                t = time.time()
+                indexed = self.close_case(issue, comments, tracked=tracked, source=source)["outcome"]
+                run.record_step(6.5, "Resolution summary + case index", "success" if indexed == "indexed" else "failure",
+                                time.time() - t, details={"outcome": indexed})
             archived = False
-            if StateChangeDetector.should_archive(ticket.get("status") or "", self.archive_statuses):
+            if closing:
                 archived = self.messenger.archive_channel(channel_id)
                 run.record_step(7, "Archive channel", "success" if archived else "failure", None)
-            self.state.tickets[key] = {"channel_id": channel_id, "channel_name": result["channel_name"],
-                                       "archived": archived, **current,
-                                       "last_comment_id": max((int(c["id"]) for c in comments
-                                                               if str(c.get("id", "")).isdigit()), default=0)}
+            tracked["archived"] = archived
+            self.state.tickets[key] = tracked
             ok = result["final_status"] == "success" and replay_ok and topic_ok and summary_ok
             run.finalize(result["channel_name"], "success" if ok else "failure")
             return {"outcome": "backfilled" if ok else "partial", "channel_id": channel_id,
-                    "channel_name": result["channel_name"], "posted": posted, "archived": archived, **plan}
+                    "channel_name": result["channel_name"], "posted": posted, "archived": archived,
+                    "indexed": indexed, **plan}
 
     def _run(self, ticket: Dict[str, Any], source: str) -> AuditLogger:
         return AuditLogger(ticket["ticket_id"], ticket.get("project_key"), ticket.get("customer"),

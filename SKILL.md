@@ -1001,6 +1001,9 @@ Automation changes, and anything a person does, stay in the history.
 With summaries on, the history is one *Case summary* message (Problem /
 Findings / Steps / Status), with only the status, priority and assignee
 changes threaded under it. Comments are not replayed one by one.
+If the ticket is already closed, backfill then does what a live closure does:
+the resolution summary goes to the channel and #case-index, the case is
+indexed, and only then is the channel archived.
 
 Every Slack and Jira call has a timeout (15–20 s) and at most 3 attempts
 (`request_with_retry` in `webhook_server.py`). Rate limits (429) are retried

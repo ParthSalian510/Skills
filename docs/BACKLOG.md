@@ -15,9 +15,7 @@ colleague names or ticket text here.
 
 ## Next improvements
 
-- Backfill of an already-closed ticket should add it to the case index, as a live closure does.
 - Optionally hide the assignee's name in "Assignee: X → Y" field-change lines.
-- Shift-handover: a "similar past cases" line.
 - Weekly recurring-problems digest to #case-index, from the graph report.
 - Comment summaries beyond the two pilot tickets (`"*"`), once quality is confirmed.
 - Scrub sub-scope names that appear only in ticket text (not the customer field) from case pages.

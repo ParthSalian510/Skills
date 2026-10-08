@@ -131,7 +131,7 @@ class FakeSlack:
         self.calls = []
     def create_channel(self, name):
         self.calls.append(("create", name))
-        return {"success": True, "channel_id": "CIDX"}
+        return {"success": True, "channel_id": "CIDX" if name == "case-index" else "C-" + name}
     def invite_users(self, cid, users):
         self.calls.append(("invite", cid))
         return True
@@ -155,6 +155,8 @@ class FakeSummarizer:
         return self.res
     def update(self, *a):
         return ""
+    def case_summary(self, ticket, comments, text_of):
+        return "*Problem:* Adapters offline\n*Status:* Closed."
 
 RES = {"problem": "Adapters offline", "root_cause": "OOM <killer>", "fix": "Reboot & restart",
        "components": ["CORE"], "keywords": ["oom"]}
@@ -232,6 +234,22 @@ with tempfile.TemporaryDirectory() as tmp:
 
     off = se.SyncEngine(slack, state, ["Completed"], case_index=idx)
     check("No summarizer → no indexing", off.indexing_for("CASE-4009") is False)
+
+    # backfill of an already-closed ticket indexes it, like a live closure
+    slack.calls.clear()
+    old = {**issue("Completed"), "key": "CASE-3100"}
+    r = eng.backfill(old, [], [{"id": "7", "jsdPublic": True, "body": "b", "created": "2026-09-22T10:00:00.000+0530"}], pause=0)
+    check("Backfill of a closed ticket indexes it", r["indexed"] == "indexed" and idx.get("CASE-3100"), r.get("indexed"))
+    chan = r["channel_id"]
+    seq = [c[0] + ":" + c[1] for c in slack.calls if c[1] in (chan, "CIDX")]
+    check("…resolution posted in the channel and #case-index before archiving",
+          "post:CIDX" in seq and seq.index(f"archive:{chan}") > max(i for i, k in enumerate(seq) if k == f"post:{chan}"), seq)
+    saved = se.ChannelState(Path(tmp) / "channels.json").tickets["CASE-3100"]
+    check("…and saved as archived and indexed", saved.get("archived") is True and saved.get("indexed") is True, saved)
+    slack.calls.clear()
+    r = eng.backfill({**issue("Pending"), "key": "CASE-3101"}, [], [], pause=0)
+    check("Backfill of an open ticket doesn't index it", r["indexed"] is None and not idx.get("CASE-3101")
+          and not any(c[1] == "CIDX" for c in slack.calls), r.get("indexed"))
     os.environ.pop("CTC_LOG_DIR", None)
 
 # ---- similar past cases for a new ticket
