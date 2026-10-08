@@ -3,23 +3,6 @@
 Open work for the create-ticket-channel skill, newest first. This repo is public: no customer names,
 colleague names or ticket text here.
 
-## Scheduled
-
-### Figma board update for 29 Sep changes (retry on 8 Oct 2026, after 11:00 IST)
-
-The Figma MCP hit the Starter plan's tool-call limit on 29 Sep, so these edits to the flow board
-(file `J27cikr5xqdcqHT56CQh7k`, page "Updated 28–29 Sep 2026") were not applied:
-
-| View | Card or text | Change |
-| --- | --- | --- |
-| 01 High-level workflow | "Rebuild from history" | Add: "Thread lines name no one; they show only what changed." |
-| 02 Technical architecture | `summarizer.py` card, "cursor per ticket · no old-history dump" | → "cursor per ticket · failed summaries retried (1 h)" |
-| 02 Technical architecture | Test-count note | summaries 40 → 44, poller 31 → 34 |
-| 03 Gap status | Comment-summaries findings | Add: "A failed summary (e.g. plan limit) posts nothing and is retried each poll; a 'see Jira' note only after 1 h." |
-| 04 Case memory | Step 1, end statuses | Add "Archived" |
-| 04 Case memory | Step 4, index count | "206 CASE cases and 1 SR from the last 6 months…" |
-| 04 Case memory | Still to decide | Add to "Done 29 Sep": "failed summaries retried, name-free history, Archived end status (5dcdbef, d7283db); live test on the 3 open assigned tickets passed" |
-
 ## Waiting on a decision
 
 - **Always-on host.** Pick the host (Bloo VM recommended), how summaries reach Claude there (own
@@ -50,3 +33,9 @@ The Figma MCP hit the Starter plan's tool-call limit on 29 Sep, so these edits t
 - Delete archived test channels in Slack's UI.
 - Remove the empty `~/.local/share/graphify-venv`.
 - Parked: webhook server and ngrok route; U3 (member-invite failure in the chat skill).
+
+## Done
+
+- 8 Oct 2026: Figma board updated with the 29 Sep changes (7 text edits across Views 01–04, none
+  skipped). A one-time cloud routine applied them after the Figma MCP Starter-plan limit stopped
+  the edits on 29 Sep.
