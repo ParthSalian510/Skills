@@ -15,9 +15,8 @@ colleague names or ticket text here.
 
 ## Next improvements
 
-- Optionally hide the assignee's name in "Assignee: X → Y" field-change lines.
+- Alert (Slack DM) when polling keeps failing, e.g. an expired Jira token; it failed silently on 8 Oct.
 - Weekly recurring-problems digest to #case-index, from the graph report.
-- Comment summaries beyond the two pilot tickets (`"*"`), once quality is confirmed.
 - Scrub sub-scope names that appear only in ticket text (not the customer field) from case pages.
 
 ## Bloo workspace

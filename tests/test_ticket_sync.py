@@ -122,7 +122,9 @@ try:
     check("Message includes ticket ID", "SR-4028" in message)
     check("Message includes status", "In Progress" in message)
     check("Message includes priority", "P1" in message)
-    check("Message includes assignee", "Jane Doe" in message)
+    check("Message shows whether assigned, never who", "Assignee: Assigned" in message and "Jane Doe" not in message)
+    check("Empty assignee shows Unassigned", StateChangeDetector.assignee_label(None) == "Unassigned"
+          and StateChangeDetector.assignee_label("Unassigned") == "Unassigned")
     check("Message includes Jira link", "View in Jira" in message)
 
 except Exception as e:

@@ -4,6 +4,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from audit_logger import AuditLogger
 from summarizer import role_of
+from case_index import kind_of, resolution_text, sections
 from ticket_sync import StateChangeDetector
 from webhook_server import WebhookValidator, provision_channel
 
@@ -77,6 +79,21 @@ class ChannelState:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def field_value(field: str, value: Any) -> str:
+    """How a field's value is shown in Slack. The assignee is never named, only Assigned or Unassigned."""
+    if field == "assignee":
+        return StateChangeDetector.assignee_label(value)
+    return value or "Not set"
+
+
+def field_change(field: str, old: Any, new: Any) -> str:
+    """"Status: Open → Pending"; a change between two people reads "Assignee: reassigned"."""
+    a, b = field_value(field, old), field_value(field, new)
+    if field == "assignee" and a == b == "Assigned":
+        return f"{FIELD_LABELS[field]}: reassigned"
+    return f"{FIELD_LABELS[field]}: {_slack_escape(a)} → {_slack_escape(b)}"
+
+
 def snapshot(ticket: Dict[str, Any]) -> Dict[str, Any]:
     return {f: ticket.get(f) for f in TRACKED_FIELDS}
 
@@ -84,7 +101,7 @@ def snapshot(ticket: Dict[str, Any]) -> Dict[str, Any]:
 def format_update_message(ticket: Dict[str, Any], changes: Dict[str, Dict[str, Any]], archiving: bool) -> str:
     lines = [f"*Jira update · {ticket['ticket_id']}*"]
     for field, change in changes.items():
-        lines.append(f"• {FIELD_LABELS[field]}: {change['old'] or 'Not set'} → {change['new'] or 'Not set'}")
+        lines.append(f"• {field_change(field, change['old'], change['new'])}")
     if archiving:
         lines.append("_Ticket resolved — archiving this channel._")
     if ticket.get("url"):
@@ -99,9 +116,11 @@ SUMMARY_RETRY_SECONDS = 3600
 class SyncEngine:
     def __init__(self, messenger, state: ChannelState, archive_statuses: List[str], invite_user_ids=(),
                  summarizer=None, fetch_comments=None, summary_tickets=(), case_index=None,
-                 index_channel_name: str = "case-index", index_tickets=("*",), similar_cases: bool = True):
+                 index_channel_name: str = "case-index", index_tickets=("*",), similar_cases: bool = True,
+                 exclude=()):
         """summarizer + fetch_comments(key) turn on comment summaries for summary_tickets ("*" = all tracked).
-        With case_index too, closing a ticket in index_tickets posts a resolution summary and indexes the case."""
+        With case_index too, closing a ticket in index_tickets posts a resolution summary and indexes the case.
+        exclude: [{"name", "pattern"}] regexes on the ticket title; a match gets no channel and no index entry."""
         self.messenger, self.state = messenger, state
         self.archive_statuses, self.invite_user_ids = archive_statuses, tuple(invite_user_ids)
         self.summarizer, self.fetch_comments = summarizer, fetch_comments
@@ -109,6 +128,12 @@ class SyncEngine:
         self.case_index, self.index_channel_name = case_index, index_channel_name
         self.index_tickets = {k.upper() for k in index_tickets}
         self.similar_cases = similar_cases
+        self.exclude = [(r["name"], re.compile(r["pattern"], re.IGNORECASE)) for r in exclude or ()]
+
+    def excluded(self, ticket: Dict[str, Any]) -> Optional[str]:
+        """Name of the exclusion rule this ticket's title matches (test tickets, templated requests), else None."""
+        title = ticket.get("summary") or ""
+        return next((name for name, rx in self.exclude if rx.search(title)), None)
 
     @property
     def similar_on_new(self) -> bool:
@@ -135,10 +160,10 @@ class SyncEngine:
         for p in picks:
             c = by_id[p["ticket_id"]]
             ref = f"<{c['jira_url']}|{c['ticket_id']}>" if c.get("jira_url") else c["ticket_id"]
-            fix = (c.get("fix") or "Not recorded").strip()
+            fix = resolution_text(c).strip()
             fix = fix if len(fix) <= 220 else fix[:220].rsplit(" ", 1)[0] + "…"
             lines.append(f"• {ref} · closed {(c.get('closed') or '?')[:10]} — {_slack_escape(p['why'] or c.get('title') or '')}\n"
-                         f"   _Fix:_ {_slack_escape(fix)}")
+                         f"   _{'Done' if kind_of(c) == 'request' else 'Fix'}:_ {_slack_escape(fix)}")
         return "posted" if self.messenger.post_message(channel_id, "\n".join(lines)) else "failed"
 
     def indexing_for(self, key: str) -> bool:
@@ -158,6 +183,8 @@ class SyncEngine:
         with self.state.locked():
             tracked = self.state.tickets.get(key)
             if tracked is None:
+                if self.excluded(ticket):
+                    return "excluded"
                 if not is_new:
                     created = parse_jira_time((issue.get("fields") or {}).get("created"))
                     if created is None or created < datetime.fromisoformat(self.state.started_at):
@@ -256,9 +283,12 @@ class SyncEngine:
                           tracked: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         ticket = WebhookValidator.extract_event_data({"webhookEvent": "jira:index", "issue": issue})
         public = [c for c in comments if c.get("jsdPublic") is not False]
-        res = self.summarizer.resolution(ticket, public, clean_comment)
+        # A service request (SR) is indexed as requested work, a CASE as a fault with a cause and fix.
+        is_request = (ticket.get("project_key") or ticket["ticket_id"].split("-")[0]).upper() == "SR"
+        res = (self.summarizer.request if is_request else self.summarizer.resolution)(ticket, public, clean_comment)
         if not res:
             return None
+        res.setdefault("kind", "request" if is_request else "case")
         fields = issue.get("fields") or {}
         from summarizer import scrub
         return {"ticket_id": ticket["ticket_id"], "title": scrub(ticket.get("summary") or ""),
@@ -278,8 +308,14 @@ class SyncEngine:
         post=False (bulk backfills) writes the index and pages only. Nothing is posted if the summary failed:
         the ticket can be indexed later with `jira_poller.py index KEY`.
         """
-        entry = self.build_index_entry(issue, comments, tracked)
         key = issue.get("key")
+        ticket = WebhookValidator.extract_event_data({"webhookEvent": "jira:index", "issue": issue}) or {}
+        rule = self.excluded(ticket)
+        if rule:
+            return {"outcome": "excluded", "ticket_id": key, "reason": rule}
+        entry = self.build_index_entry(issue, comments, tracked)
+        if entry and entry.get("category") == "test or internal":  # Claude's catch for tests the title rules miss
+            return {"outcome": "excluded", "ticket_id": key, "reason": "test or internal (summary)"}
         if not entry:
             logger.error(f"[{source}] resolution summary failed for {key}; not indexed")
             return {"outcome": "failed", "ticket_id": key}
@@ -379,7 +415,7 @@ class SyncEngine:
             topic_ok = self.messenger.set_topic(channel_id, topic)
             current = snapshot(ticket)
             summary_ok = bool(self.messenger.post_message(channel_id, "*Synced to current state* · " + " · ".join(
-                f"{FIELD_LABELS[f]}: {_slack_escape(current[f] or 'Not set')}" for f in TRACKED_FIELDS)))
+                f"{FIELD_LABELS[f]}: {_slack_escape(field_value(f, current[f]))}" for f in TRACKED_FIELDS)))
             run.record_step(6, "Apply current state", "success" if topic_ok and summary_ok else "failure",
                             time.time() - t, details={"topic": topic})
 
@@ -574,14 +610,13 @@ def build_timeline(changelog: List[Dict[str, Any]], comments: List[Dict[str, Any
 def format_index_message(entry: Dict[str, Any], in_channel: bool = False) -> str:
     """#case-index message (or the closing note in the ticket's own channel)."""
     key = entry["ticket_id"]
-    head = (f"*Resolution summary · {key}*" if in_channel else
+    is_request = kind_of(entry) == "request"
+    head = (f"*{'Request summary' if is_request else 'Resolution summary'} · {key}*" if in_channel else
             f"*{key}* · {_slack_escape(entry.get('customer') or '?')} · "
             f"{_slack_escape(entry.get('product_version') or 'no version')} · {entry.get('priority') or '?'}"
             f" — {_slack_escape(entry.get('title') or '')}")
-    lines = [head,
-             f"*Problem:* {_slack_escape(entry.get('problem') or '-')}",
-             f"*Root cause:* {_slack_escape(entry.get('root_cause') or '-')}",
-             f"*Fix:* {_slack_escape(entry.get('fix') or '-')}"]
+    lines = [head] + [f"*{label}:* {_slack_escape(entry.get(field) or '-')}" for field, label in sections(entry)
+                      if not (field == "blockers" and not entry.get(field))]
     tail = []
     if entry.get("components"):
         tail.append("_" + _slack_escape(", ".join(entry["components"])) + "_")
@@ -612,7 +647,6 @@ def format_event(event: Dict[str, Any]) -> str:
     """One thread line. No people's names: a change shows only what changed, a comment only the author's role."""
     when = event["at"].strftime("%d %b %H:%M")
     if event["kind"] == "change":
-        parts = "; ".join(f"{FIELD_LABELS[f]}: {_slack_escape(o or 'Not set')} → {_slack_escape(n or 'Not set')}"
-                          for f, o, n in event["changes"])
+        parts = "; ".join(field_change(f, o, n) for f, o, n in event["changes"])
         return f"*{when}* · {parts}"
     return f"*{when}* · :speech_balloon: *{_slack_escape(event['who'])}*\n{_slack_escape(event['text'])}"

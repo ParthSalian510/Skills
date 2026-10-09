@@ -148,6 +148,8 @@ with tempfile.TemporaryDirectory() as tmp:
     jira.issues = [issue("CASE-4020", now + timedelta(seconds=5), priority="P1", assignee="Sam")]
     poller.poll_once()
     check("Assignee change posts note only", kinds(slack) == ["send"], kinds(slack))
+    check("Reassignment names no one", "Assignee: reassigned" in slack.calls[0][2]
+          and "Sam" not in slack.calls[0][2] and "Parth" not in slack.calls[0][2], slack.calls[0][2])
 
     # Resolved: topic, message mentioning archive, archive, then inactive.
     slack.calls.clear()

@@ -23,7 +23,34 @@ from typing import Any, Dict, List, Optional
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_INDEX_PATH = SKILL_ROOT / "index" / "cases.jsonl"
+# What each kind of entry records: a CASE is a fault (problem → cause → fix), an SR is a piece of requested
+# work (request → category → work done → outcome). Messages, search, pages and the CLI all read this.
+ENTRY_SECTIONS = {
+    "case": [("problem", "Problem"), ("root_cause", "Root cause"), ("fix", "Fix")],
+    "request": [("request", "Request"), ("category", "Category"), ("work_done", "Work done"),
+                ("outcome", "Outcome"), ("blockers", "Blockers")],
+}
+
+
+def kind_of(e: Dict[str, Any]) -> str:
+    return "request" if e.get("kind") == "request" else "case"
+
+
+def sections(e: Dict[str, Any]):
+    """(field, label) pairs for this entry's kind, in display order."""
+    return ENTRY_SECTIONS[kind_of(e)]
+
+
+def resolution_text(e: Dict[str, Any]) -> str:
+    """The one line that says how it ended: a case's fix, or a request's work done and outcome."""
+    if kind_of(e) == "request":
+        done = e.get("work_done") or "Nothing recorded"
+        return f"{done} ({e['outcome']})" if e.get("outcome") else done
+    return e.get("fix") or "Not recorded"
+
+
 SEARCH_FIELDS = {"title": 3, "problem": 3, "root_cause": 3, "fix": 2, "components": 3, "keywords": 3,
+                 "request": 3, "category": 2, "work_done": 2, "blockers": 1,
                  "customer": 2, "product_version": 1, "ticket_id": 5}
 
 
@@ -186,7 +213,7 @@ def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
     Rewritten from scratch each time, so it always matches the index.
     """
     import shutil
-    for sub in ("cases", "concepts"):  # only our own folders: graphify-out/ etc. next to them survive
+    for sub in ("cases", "requests", "concepts"):  # only our own folders: graphify-out/ etc. next to them survive
         if (out_dir / sub).exists():
             shutil.rmtree(out_dir / sub)
         (out_dir / sub).mkdir(parents=True)
@@ -203,7 +230,8 @@ def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
         # (one linked 28 cases), so topics grouped by customer instead of by kind of problem. The name stays
         # in index/cases.jsonl, search and #case-index; only the graph input leaves it out.
         cust = (e.get("customer") or "").strip()
-        text = {k: _without_customers(e.get(k) or "", cust, customers) for k in ("title", "problem", "root_cause", "fix")}
+        text = {k: _without_customers(e.get(k) or "", cust, customers)
+                for k in ["title"] + [f for f, _ in sections(e)]}
         links = [f"version {e['product_version']}"] if e.get("product_version") else []
         comp_links = []
         for key, display in concepts_of(e).items():
@@ -215,27 +243,38 @@ def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
             concept_cases.setdefault(page, []).append(e["ticket_id"])
             names.setdefault(page, display)
             comp_links.append(f"[[{page}|{display}]]")
+        kind = kind_of(e)
+        if kind == "request" and e.get("category"):
+            # a fixed link written by this code (not left to Graphify's guesswork): every request joins its category
+            page = _page_name(f"request {e['category']}")
+            concept_cases.setdefault(page, []).append(e["ticket_id"])
+            names.setdefault(page, f"Request type: {e['category']}")
+            text["category"] = f"[[{page}|{e['category']}]]"
         body = [f"# {e['ticket_id']} · {text['title']}", "",
-                " · ".join([f"Closed {(e.get('closed') or '?')[:10]}", f"priority {e.get('priority') or '?'}"] + links), "",
-                f"**Problem:** {text['problem'] or '-'}", "", f"**Root cause:** {text['root_cause'] or '-'}", "",
-                f"**Fix:** {text['fix'] or '-'}", "", "**Involves:** " + (", ".join(comp_links) or "-")]
+                " · ".join([("Service request · " if kind == "request" else "") + f"Closed {(e.get('closed') or '?')[:10]}",
+                            f"priority {e.get('priority') or '?'}"] + links), ""]
+        for field, label in sections(e):
+            if field == "blockers" and not text.get(field):
+                continue
+            body += [f"**{label}:** {text.get(field) or '-'}", ""]
+        body.append("**Involves:** " + (", ".join(comp_links) or "-"))
         if e.get("jira_url"):
             body += ["", f"[Open in Jira]({e['jira_url']})"]
-        (out_dir / "cases" / f"{e['ticket_id']}.md").write_text("\n".join(body) + "\n")
+        folder = "requests" if kind == "request" else "cases"
+        (out_dir / folder / f"{e['ticket_id']}.md").write_text("\n".join(body) + "\n")
     for page, cases in concept_cases.items():
         lines = [f"# {names[page]}", "", "Cases:"] + [f"- [[{c}]]" for c in sorted(set(cases), reverse=True)]
         (out_dir / "concepts" / f"{page}.md").write_text("\n".join(lines) + "\n")
-    return {"cases": len(index.entries()), "concepts": len(concept_cases)}
+    kinds = [kind_of(e) for e in index.entries()]
+    return {"cases": kinds.count("case"), "requests": kinds.count("request"), "concepts": len(concept_cases)}
 
 
 def format_entry(e: Dict[str, Any]) -> str:
     """Plain-text view for the CLI."""
     lines = [f"{e['ticket_id']} · {e.get('customer') or '?'} · {e.get('product_version') or 'no version'} · "
              f"{e.get('priority') or '?'} · closed {(e.get('closed') or '?')[:10]}",
-             f"  {e.get('title') or ''}",
-             f"  Problem:    {e.get('problem') or '-'}",
-             f"  Root cause: {e.get('root_cause') or '-'}",
-             f"  Fix:        {e.get('fix') or '-'}"]
+             f"  {e.get('title') or ''}"]
+    lines += [f"  {label + ':':<11} {e.get(field) or '-'}" for field, label in sections(e)]
     if e.get("components"):
         lines.append(f"  Components: {', '.join(e['components'])}")
     if e.get("jira_url"):
@@ -279,7 +318,8 @@ def main(argv=None) -> int:
             print("No related cases yet.")
     elif args.cmd == "export":
         counts = export_pages(index, Path(args.out))
-        print(f"Wrote {counts['cases']} case pages and {counts['concepts']} concept pages to {args.out}")
+        print(f"Wrote {counts['cases']} case pages, {counts['requests']} request pages and "
+              f"{counts['concepts']} concept pages to {args.out}")
     else:
         for e in index.entries():
             print(f"{e['ticket_id']:<11} {(e.get('closed') or '')[:10]}  {e.get('customer') or '?':<14} {e.get('title') or ''}")

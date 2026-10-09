@@ -217,7 +217,7 @@ tier_2:
     # settings and skills disabled. No names, contact or meeting details.
     summaries:
       enabled: true
-      tickets: [CASE-3997, SR-4159]   # tracked tickets to summarise; "*" = all
+      tickets: ["*"]   # every tracked ticket; or a list such as [CASE-3997, SR-4159]
       model: claude-opus-5-5
       timeout_seconds: 180
       # claude_path: /home/<user>/.local/bin/claude   # default: found on PATH
@@ -234,6 +234,15 @@ tier_2:
       # New ticket channels get up to 3 "possibly related past cases" from the
       # index (shortlisted by keywords, checked by Claude; no customer names).
       similar_on_new: true
+
+    # Tickets the sync leaves alone entirely: no channel, no comment summaries, no case index.
+    # Regexes on the Jira title, case-insensitive. Agreed 9 Oct 2026: templated stream/field validation
+    # requests and test tickets add nothing; extractor and parser tickets stay (parsing can break after one).
+    exclude_tickets:
+      - name: stream/fields validation
+        pattern: 'stream\s*/\s*fields?\s+validation\s+request'
+      - name: test or internal
+        pattern: '^\s*test(?![a-z])|\b(verification test|smoke test|uat[-_ ]?check|test[_ -]?case|test[_ -]test\w*|brute[_ ]?force test|internal test(ing)?|case test)\b|\b(dnif|bloo|sme)\s+(internal\s+)?test'
 
     archive_on_status:
       - "Done"

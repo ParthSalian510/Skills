@@ -907,7 +907,8 @@ each ticket returned:
 - **Anything else** (older untracked tickets, archived channels): ignored.
 
 **Comment summaries** (`scripts/summarizer.py`, config `tier_2.sync.summaries`):
-for opted-in tickets (`tickets: [CASE-3997]`, or `"*"` for all), new public
+for every tracked ticket (`tickets: ["*"]`, the default since 8 Oct 2026; a list such as
+`[CASE-3997]` limits it), new public
 comments become one short *Update* note of 1–3 bullets written by Claude.
 It never copies the comment text. The team uses these channels as a memory
 map of each case, so the notes say what was found, what was done and what's
@@ -921,6 +922,8 @@ next.
   note say "Summary unavailable, see Jira", never copying the comments.
 - Backfilled history names no one: field changes show only what changed, and
   comments show the author's role (Customer or Support).
+- The assignee is never named in Slack, only *Assigned* or *Unassigned*; a change
+  between two people reads "Assignee: reassigned". Names stay in local state only.
 - The first time a ticket is seen, only the comment cursor is recorded, so
   old history is never dumped into a channel.
 - It runs the Claude Code CLI (`claude -p`) under this machine's login. No
@@ -944,6 +947,20 @@ message in `#case-index`, and saved to `index/cases.jsonl`.
 - If the summary fails, nothing is posted and the channel is still archived;
   re-run it with `index KEY`.
 - Re-indexing a ticket replaces its entry.
+- **Service requests (SR) are indexed differently**, because they are requested
+  work, not faults: *request, category, work done, outcome, blockers*. Category
+  and outcome come from fixed lists in `summarizer.py` (`REQUEST_CATEGORIES`,
+  `REQUEST_OUTCOMES`, reviewed on two pilots on 9 Oct 2026). SR pages go in
+  `index/pages/requests/` and link to a fixed "Request type" page per category,
+  and share component pages with CASE tickets.
+
+**Excluded tickets** (`tier_2.sync.exclude_tickets`): title regexes for tickets
+the sync leaves alone entirely, with no channel, no summaries and no index entry. Agreed
+on 9 Oct 2026: templated *Stream/Fields validation request* SRs and test or
+internal tickets. Extractor and parser tickets stay, since parsing can break
+after an extractor is applied. If a summary comes back as "test or internal",
+that ticket is excluded too. Of the 472 SRs closed in the 6 months to
+9 Oct 2026, 91 were stream/fields validation, 67 were tests and 314 were kept.
 
 ```bash
 python3 scripts/jira_poller.py index CASE-4009 [CASE-…] [--dry-run]   # index closed tickets (past cases too)

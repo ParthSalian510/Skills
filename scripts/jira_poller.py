@@ -84,12 +84,13 @@ class JiraClient:
 class Poller:
     def __init__(self, jira, messenger, state: ChannelState, projects: List[str], lookback_minutes: int,
                  archive_statuses: List[str], invite_user_ids=(), summarizer=None, summary_tickets=(),
-                 case_index=None, index_channel_name="case-index", index_tickets=("*",), similar_cases=True):
+                 case_index=None, index_channel_name="case-index", index_tickets=("*",), similar_cases=True,
+                 exclude=()):
         self.jira, self.state = jira, state
         self.engine = SyncEngine(messenger, state, archive_statuses, invite_user_ids, summarizer=summarizer,
                                  fetch_comments=jira.get_comments if summarizer else None,
                                  summary_tickets=summary_tickets, case_index=case_index,
-                                 index_channel_name=index_channel_name, index_tickets=index_tickets,
+                                 index_channel_name=index_channel_name, index_tickets=index_tickets, exclude=exclude,
                                  similar_cases=similar_cases)
         self.projects, self.lookback_minutes = projects, lookback_minutes
         self.failing = False
@@ -133,7 +134,7 @@ class Poller:
                 if self.failing:
                     logger.info("Jira polling recovered")
                     self.failing = False
-                active = {k: v for k, v in counts.items() if k not in ("unchanged", "ignored", "inactive")}
+                active = {k: v for k, v in counts.items() if k not in ("unchanged", "ignored", "inactive", "excluded")}
                 if active:
                     logger.info(f"Poll: {active}")
             except Exception as e:
@@ -178,6 +179,7 @@ def build_poller(state_path: Path) -> "Poller":
         index_channel_name=(cfg.get("case_index") or {}).get("slack_channel", "case-index"),
         index_tickets=(cfg.get("case_index") or {}).get("tickets") or ["*"],
         similar_cases=(cfg.get("case_index") or {}).get("similar_on_new", True),
+        exclude=cfg.get("exclude_tickets") or [],
     )
 
 
@@ -295,11 +297,12 @@ def main(argv=None) -> int:
                             cid, f"*{added} past case{'s' if added != 1 else ''} added to the index* (backfill, "
                                  f"not posted one by one). Search with `case_index.py search` or ask Claude via case-graph.")
         slim = [{k: r.get(k) for k in ("ticket_id", "outcome", "status")} for r in results]
-        print(json.dumps(slim if len(results) > 5 else results, indent=2, ensure_ascii=False))
+        # a dry run exists to be reviewed, so it always shows the full entries; real batches print one line each
+        print(json.dumps(results if args.dry_run or len(results) <= 5 else slim, indent=2, ensure_ascii=False))
         failed_keys = [r["ticket_id"] for r in results if r["outcome"] == "failed"]
         if failed_keys:
             print("Failed (re-run with --skip-indexed to retry): " + " ".join(failed_keys), file=sys.stderr)
-        return 0 if all(r["outcome"] in ("indexed", "dry_run", "not_closed") for r in results) else 1
+        return 0 if all(r["outcome"] in ("indexed", "dry_run", "not_closed", "excluded") for r in results) else 1
     if args.cmd == "once":
         print(json.dumps(poller.poll_once()))
         return 0

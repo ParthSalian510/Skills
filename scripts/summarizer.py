@@ -87,6 +87,31 @@ Reply with only a JSON object, no code fence, with these keys:
 {ticket}
 </ticket>"""
 
+# Service requests (SR) aren't faults: they are indexed by what was asked, what kind of work it was and how it ended.
+# Reviewed on the 9 Oct 2026 pilot: extractor/parser work is its own type (incl. parsing broken after an extractor
+# is applied), patching is separate from upgrades, and test/internal tickets are named so they can be left out.
+REQUEST_CATEGORIES = ["upgrade", "patching or maintenance", "new log source or integration",
+                      "extractor or parser (incl. parsing issues)", "configuration change", "access or user management",
+                      "content (workbook, rule, report or dashboard)", "health check or review", "storage or retention",
+                      "licence or commercial", "test or internal", "other"]
+REQUEST_OUTCOMES = ["completed", "partially completed", "cancelled", "declined", "no response from customer",
+                    "pending approval", "closed without action", "other"]
+
+REQUEST_PROMPT = """This service request is closed. Write its entry for the team's index of past work, so someone handling a similar request later can see what was asked, what was done and how it ended.
+
+Reply with only a JSON object, no code fence, with these keys:
+  "request": one or two sentences on what the customer asked for.
+  "category": exactly one of: {categories}.
+  "work_done": one to three sentences on what support actually did; say "Nothing recorded" if unclear.
+  "outcome": exactly one of: {outcomes}.
+  "blockers": one sentence on what held it up (approvals, missing information, no reply), or "" if nothing did.
+  "components": up to 6 short names of the services, servers or product areas involved.
+  "keywords": up to 8 lowercase search words or short phrases someone might type.
+
+<ticket>
+{ticket}
+</ticket>"""
+
 RELATED_PROMPT = """A new support ticket was opened. Below it are past closed cases that might be related. Pick at most 3 that are genuinely the same kind of problem (same component and symptom, or same root cause), so the engineer can learn from how they were fixed. Unrelated or only superficially similar cases must be left out; picking none is fine.
 
 Reply with only a JSON list, no code fence: [{{"ticket_id": "...", "why": "one short clause on what they share"}}], or [] if none.
@@ -183,11 +208,35 @@ class ClaudeCLISummarizer:
             out[field] = [v for v in (self._clean(str(x), names) for x in values[:cap]) if v]
         return out if out["problem"] else None
 
+    def request(self, ticket: Dict[str, Any], comments: List[Dict[str, Any]],
+                text_of: Callable[[Any], str]) -> Optional[Dict[str, Any]]:
+        """Structured request / category / work done / outcome for a closed SR; None if the call or JSON failed."""
+        raw = self._ask(REQUEST_PROMPT.format(categories=", ".join(REQUEST_CATEGORIES),
+                                              outcomes=", ".join(REQUEST_OUTCOMES),
+                                              ticket=render_ticket(ticket, comments, text_of)))
+        data = _parse_json(raw)
+        if not data:
+            return None
+        names = _names(comments)
+        out: Dict[str, Any] = {"kind": "request"}
+        for field in ("request", "work_done", "blockers"):
+            value = data.get(field)
+            out[field] = self._clean(str(value), names) if value else None
+        category, outcome = str(data.get("category") or "").strip().lower(), str(data.get("outcome") or "").strip().lower()
+        out["category"] = category if category in REQUEST_CATEGORIES else "other"
+        out["outcome"] = outcome if outcome in REQUEST_OUTCOMES else "other"
+        for field, cap in (("components", 6), ("keywords", 8)):
+            values = data.get(field) if isinstance(data.get(field), list) else []
+            out[field] = [v for v in (self._clean(str(x), names) for x in values[:cap]) if v]
+        return out if out["request"] else None
+
     def pick_related(self, ticket: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Optional[List[Dict[str, str]]]:
         """Claude's choice (≤3) from candidate past cases, each with a short reason; None if the call failed."""
         new = (f"Title: {scrub(ticket.get('summary') or '')}\nDescription: {scrub(ticket.get('description') or '')}")
-        cases = "\n\n".join(f"{c['ticket_id']}: {scrub(c.get('title') or '')}\n  Problem: {c.get('problem')}\n"
-                             f"  Root cause: {c.get('root_cause')}\n  Fix: {c.get('fix')}" for c in candidates)
+        from case_index import sections
+        cases = "\n\n".join(f"{c['ticket_id']}: {scrub(c.get('title') or '')}\n"
+                             + "\n".join(f"  {label}: {c.get(field)}" for field, label in sections(c))
+                             for c in candidates)
         raw = self._ask(RELATED_PROMPT.format(ticket=new, cases=cases))
         if raw is None:
             return None

@@ -125,6 +125,54 @@ with tempfile.TemporaryDirectory() as tmp:
     empty = sm.ClaudeCLISummarizer(workdir=Path(tmp), runner=fake_cli('{"problem": "", "fix": "x"}'))
     check("No problem statement → None", empty.resolution({"ticket_id": "CASE-1"}, people, str) is None)
 
+# ---- service requests (SR): request / category / work done / outcome
+with tempfile.TemporaryDirectory() as tmp:
+    good = sm.ClaudeCLISummarizer(workdir=Path(tmp), runner=fake_cli(
+        '{"request": "Upgrade five servers; Alex asked for the window", "category": "Upgrade", "work_done": "Prechecks done",'
+        ' "outcome": "pending approval", "blockers": "Management approval", "components": ["Core server"], "keywords": ["upgrade"]}'))
+    r = good.request({"ticket_id": "SR-1"}, people, str)
+    check("Request JSON parsed, category normalised to the fixed list", r and r["kind"] == "request"
+          and r["category"] == "upgrade" and r["outcome"] == "pending approval", r)
+    check("Names scrubbed from request fields", "Alex" not in r["request"], r["request"])
+    odd = sm.ClaudeCLISummarizer(workdir=Path(tmp), runner=fake_cli('{"request": "x", "category": "made up", "outcome": "?"}'))
+    r2 = odd.request({"ticket_id": "SR-1"}, people, str)
+    check("Unknown category or outcome → other", r2["category"] == "other" and r2["outcome"] == "other", r2)
+    none = sm.ClaudeCLISummarizer(workdir=Path(tmp), runner=fake_cli('{"category": "upgrade"}'))
+    check("No request statement → None", none.request({"ticket_id": "SR-1"}, people, str) is None)
+
+with tempfile.TemporaryDirectory() as tmp:
+    idx = ci.CaseIndex(Path(tmp) / "cases.jsonl")
+    sr = {"ticket_id": "SR-7", "kind": "request", "title": "ACME | Upgrade SIEM", "customer": "ACME",
+          "request": "ACME asked to upgrade the SIEM", "category": "upgrade", "work_done": "Ran prechecks on the Core server",
+          "outcome": "no response from customer", "blockers": "", "components": ["Core server"], "keywords": ["upgrade"],
+          "closed": "2026-09-23"}
+    idx.upsert(sr)
+    idx.upsert(entry("CASE-8", components=["Core server"], keywords=["oom"]))
+    idx.upsert({**sr, "ticket_id": "SR-9", "customer": "Beta", "title": "Beta | Upgrade adapters"})
+    msg = se.format_index_message(idx.get("SR-7"))
+    check("#case-index message for a request", "*Request:* ACME asked to upgrade the SIEM" in msg and "*Category:* upgrade" in msg
+          and "*Outcome:* no response from customer" in msg and "Root cause" not in msg and "Blockers" not in msg, msg)
+    check("Closing note in the channel says Request summary", se.format_index_message(idx.get("SR-7"), in_channel=True)
+          .startswith("*Request summary · SR-7*"))
+    check("Resolution line for a request", ci.resolution_text(idx.get("SR-7")) ==
+          "Ran prechecks on the Core server (no response from customer)")
+    check("Search finds requests by their work", [e["ticket_id"] for e in idx.search("prechecks")][:2] == ["SR-7", "SR-9"]
+          or {e["ticket_id"] for e in idx.search("prechecks")} >= {"SR-7", "SR-9"})
+    out = Path(tmp) / "pages"
+    counts = ci.export_pages(idx, out)
+    check("Requests get their own folder", counts["requests"] == 2 and counts["cases"] == 1
+          and (out / "requests" / "SR-7.md").exists() and not (out / "cases" / "SR-7.md").exists(), counts)
+    page = (out / "requests" / "SR-7.md").read_text()
+    check("Request page: fixed category link, outcome, no customer", "[[request upgrade|upgrade]]" in page
+          and "**Outcome:** no response from customer" in page and "ACME" not in page and "Service request" in page, page)
+    check("Category page lists every request of that type",
+          "[[SR-7]]" in (out / "concepts" / "request upgrade.md").read_text()
+          and "[[SR-9]]" in (out / "concepts" / "request upgrade.md").read_text())
+    check("Cases and requests share component pages", "[[SR-7]]" in (out / "concepts" / "core.md").read_text()
+          and "[[CASE-8]]" in (out / "concepts" / "core.md").read_text())
+    check("CLI view shows request fields", "Work done:" in ci.format_entry(idx.get("SR-7"))
+          and "Root cause" not in ci.format_entry(idx.get("SR-7")))
+
 # ---- engine: closing a ticket
 class FakeSlack:
     def __init__(self):
@@ -155,6 +203,9 @@ class FakeSummarizer:
         return self.res
     def update(self, *a):
         return ""
+    def request(self, ticket, comments, text_of):
+        return {"request": "Upgrade", "category": "upgrade", "work_done": "Done", "outcome": "completed",
+                "blockers": None, "components": ["CORE"], "keywords": []}
     def case_summary(self, ticket, comments, text_of):
         return "*Problem:* Adapters offline\n*Status:* Closed."
 
@@ -234,6 +285,47 @@ with tempfile.TemporaryDirectory() as tmp:
 
     off = se.SyncEngine(slack, state, ["Completed"], case_index=idx)
     check("No summarizer → no indexing", off.indexing_for("CASE-4009") is False)
+
+    sr_issue = {**issue("Completed"), "key": "SR-4200"}
+    sr_issue["fields"] = {**sr_issue["fields"], "project": {"key": "SR"}}
+    e_sr = eng.build_index_entry(sr_issue, [])
+    check("SR tickets are indexed as requests", e_sr["kind"] == "request" and e_sr["category"] == "upgrade"
+          and "problem" not in e_sr, e_sr)
+    check("CASE tickets stay cases", eng.build_index_entry(issue("Completed"), [])["kind"] == "case")
+
+    # excluded tickets: no channel, no index entry, no Claude call
+    import yaml
+    rules = yaml.safe_load((ROOT / "config" / "config.yaml").read_text())["tier_2"]["sync"]["exclude_tickets"]
+    calls = []
+    class CountingSummarizer(FakeSummarizer):
+        def request(self, *a):
+            calls.append(1)
+            return {"request": "x", "category": "test or internal", "work_done": "", "outcome": "other",
+                    "blockers": None, "components": [], "keywords": []}
+    ex = se.SyncEngine(slack, state, ["Completed"], summarizer=CountingSummarizer(RES), fetch_comments=lambda k: [],
+                       case_index=idx, exclude=rules)
+    def titled(key, title, status="Completed"):
+        i = {**issue(status), "key": key}
+        i["fields"] = {**i["fields"], "summary": title, "project": {"key": key.split("-")[0]},
+                       "created": "2099-01-01T00:00:00.000+0530"}
+        return i
+    excluded_titles = ["Bloo [ACME]: Stream/Fields validation request for enabling extractor x-custom(176)",
+                       "DNIF Verification Test", "uat-check-e2e-1", "Test_Aug_19", "test6", "Test Brute Force",
+                       "Vendor Test Case 2", "deploy smoke test", "DNIF Internal Test 18", "SME Test", "Bloo Case Test",
+                       "Brute Force Test July 22"]
+    kept_titles = ["Request to update parser for Cisco ASA firewall", "ACME PROD and TEST servers VA",
+                   "Zscaler Extractor Fields Parsing Error", "Testing connectivity to the new collector"]
+    check("Title rules catch templated and test tickets",
+          all(ex.excluded({"summary": t}) for t in excluded_titles), [t for t in excluded_titles if not ex.excluded({"summary": t})])
+    check("…and keep real requests, incl. extractor/parser work", not any(ex.excluded({"summary": t}) for t in kept_titles),
+          [t for t in kept_titles if ex.excluded({"summary": t})])
+    slack.calls.clear()
+    check("Excluded new ticket gets no channel", ex.process(titled("SR-9001", excluded_titles[0], "Waiting for support"), "poller")
+          == "excluded" and not any(c[0] == "create" for c in slack.calls), slack.calls)
+    r = ex.close_case(titled("SR-9002", "DNIF Verification Test"), [], dry_run=True)
+    check("Excluded ticket not indexed and costs no Claude call", r["outcome"] == "excluded" and calls == [], r)
+    r = ex.close_case(titled("SR-9003", "Dropped File Test"), [], dry_run=True)
+    check("Claude's 'test or internal' verdict also excludes", r["outcome"] == "excluded" and calls == [1], r)
 
     # backfill of an already-closed ticket indexes it, like a live closure
     slack.calls.clear()

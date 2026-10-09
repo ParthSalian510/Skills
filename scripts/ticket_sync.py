@@ -104,11 +104,16 @@ class StateChangeDetector:
         return f"{status_emoji} {ticket_id} - {status} {priority_emoji} {priority}"
 
     @staticmethod
+    def assignee_label(value: Optional[str]) -> str:
+        """Slack never shows who a ticket is assigned to, only whether it is (no agent names in channels)."""
+        return "Unassigned" if not value or value == "Unassigned" else "Assigned"
+
+    @staticmethod
     def format_pinned_message(ticket_id: str, state: Dict[str, Any], jira_url: str) -> str:
         """Format the pinned message showing ticket state."""
         status = state.get("status", "Unknown")
         priority = state.get("priority", "Unknown")
-        assignee = state.get("assignee", "Unassigned")
+        assignee = StateChangeDetector.assignee_label(state.get("assignee"))
         updated_at = state.get("updated_at", "Unknown")
 
         status_emoji = StateChangeDetector.format_status_emoji(status)

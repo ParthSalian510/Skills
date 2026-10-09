@@ -78,6 +78,12 @@ check("6 events (4 changes + 2 public comments)", len(tl) == 6, len(tl))
 check("Comment shows the author's role, not their name, and is escaped for Slack",
       "Casey" not in se.format_event(tl[-2]) and ("*Support*" in se.format_event(tl[-2]) or "*Customer*" in se.format_event(tl[-2]))
       and "&amp;" in se.format_event(tl[-2]), se.format_event(tl[-2]))
+check("Assignee change shows Unassigned → Assigned, not the person",
+      any("Assignee: Unassigned → Assigned" in se.format_event(e) for e in tl)
+      and not any("Parth" in se.format_event(e) for e in tl), [se.format_event(e) for e in tl])
+check("Field change helper", se.field_change("assignee", "A", "B") == "Assignee: reassigned"
+      and se.field_change("assignee", "A", None) == "Assignee: Assigned → Unassigned"
+      and se.field_change("status", "Open", "Pending") == "Status: Open → Pending")
 check("Change line names no one", se.format_event(tl[0]) == "*21 Sep 16:32* · Priority: P1 → P3", se.format_event(tl[0]))
 
 # N3: Automation's first-seconds changes belong to the opening state (real CASE-4009 pattern).
