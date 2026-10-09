@@ -9,7 +9,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 import yaml
@@ -93,7 +93,7 @@ class Poller:
                                  index_channel_name=index_channel_name, index_tickets=index_tickets, exclude=exclude,
                                  similar_cases=similar_cases)
         self.projects, self.lookback_minutes = projects, lookback_minutes
-        self.failing = False
+        self.failing, self.failing_since, self.alerted_at = False, None, None
 
     def lookback(self) -> int:
         """Minutes to look back: the configured window, widened to cover any gap since the last good poll."""
@@ -129,23 +129,72 @@ class Poller:
         logger.info(f"Polling {', '.join(self.projects)} every {interval_seconds}s")
         while True:
             start = time.time()
-            try:
-                counts = self.poll_once()
-                if self.failing:
-                    logger.info("Jira polling recovered")
-                    self.failing = False
-                active = {k: v for k, v in counts.items() if k not in ("unchanged", "ignored", "inactive", "excluded")}
-                if active:
-                    logger.info(f"Poll: {active}")
-            except Exception as e:
-                logger.error(f"Poll failed: {e}")
-                if not self.failing:
-                    run = AuditLogger("poll", None, None, None, source="poller")
-                    run.record_step(0, "Query Jira", "failure", time.time() - start,
-                                    error={"type": type(e).__name__, "message": str(e)[:500]})
-                    run.finalize(None, "failure")
-                self.failing = True
+            self.tick()
             time.sleep(max(0.0, interval_seconds - (time.time() - start)))
+
+    def tick(self, now: Optional[float] = None) -> Optional[Dict[str, int]]:
+        """One poll. A failure that lasts ALERT_AFTER_SECONDS sends a Slack alert (repeated every
+        REALERT_SECONDS), and a recovery after an alert says so: an expired Jira token once went unnoticed for days."""
+        now = time.time() if now is None else now
+        try:
+            counts = self.poll_once()
+        except Exception as e:
+            logger.error(f"Poll failed: {e}")
+            if not self.failing:
+                run = AuditLogger("poll", None, None, None, source="poller")
+                run.record_step(0, "Query Jira", "failure", 0,
+                                error={"type": type(e).__name__, "message": str(e)[:500]})
+                run.finalize(None, "failure")
+                self.failing_since = now
+            self.failing = True
+            due = self.alerted_at is None or now - self.alerted_at >= REALERT_SECONDS
+            if now - self.failing_since >= ALERT_AFTER_SECONDS and due:
+                self.alert(failure_alert(e, self.failing_since))
+                self.alerted_at = now
+            return None
+        if self.failing:
+            logger.info("Jira polling recovered")
+            if self.alerted_at is not None:
+                minutes = round((now - self.failing_since) / 60)
+                self.alert(f":white_check_mark: *Jira sync recovered* after about {minutes} min of failed polls. "
+                           f"The next polls catch up on everything missed.")
+        self.failing, self.failing_since, self.alerted_at = False, None, None
+        active = {k: v for k, v in counts.items() if k not in ("unchanged", "ignored", "inactive", "excluded")}
+        if active:
+            logger.info(f"Poll: {active}")
+        return counts
+
+    def alert(self, text: str) -> bool:
+        """DM each person on the invite list; if no DM gets through, post in #case-index instead."""
+        sent = False
+        for user in self.engine.invite_user_ids:
+            sent |= bool(self.engine.messenger.post_message(user, text))
+        if not sent:  # DMs need the app's Messages tab enabled; otherwise post in #case-index and @-mention people
+            cid = self.state.meta.get("index_channel_id")
+            mentions = " ".join(f"<@{u}>" for u in self.engine.invite_user_ids)
+            sent = bool(cid and self.engine.messenger.post_message(cid, f"{mentions} {text}".strip()))
+        if not sent:
+            logger.error("Could not deliver the polling alert to Slack")
+        return sent
+
+
+# A failing poller alerts after 10 minutes, and again every 6 hours while it keeps failing.
+ALERT_AFTER_SECONDS = 600
+REALERT_SECONDS = 6 * 3600
+
+
+def failure_alert(error: Exception, since: float) -> str:
+    when = datetime.fromtimestamp(since).strftime("%d %b %H:%M")
+    text = str(error)
+    if "401" in text or "Unauthorized" in text:
+        hint = ("Jira rejected the API token (401): it has probably expired. Create a new scoped token "
+                "(Jira, `read:jira-work`) and run `bash deploy/update-jira-token.sh` on the poller machine.")
+    elif "403" in text:
+        hint = "Jira refused access (403): the token is missing a scope or the account lost project access."
+    else:
+        hint = "Check `journalctl --user -u ctc-jira-poller` on the poller machine."
+    return (f":warning: *Jira sync is failing* since {when}, so nothing is reaching Slack.\n{hint}\n"
+            f"_Error: {text[:160]}_")
 
 
 def load_sync_config() -> Dict[str, Any]:

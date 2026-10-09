@@ -78,6 +78,10 @@ class FakeSlack:
         self.calls.append(("archive", channel_id))
         return True
 
+    def post_message(self, channel_id, text, thread_ts=None):
+        self.calls.append(("post", channel_id, text))
+        return None if channel_id in getattr(self, "unreachable", ()) else "1.0"
+
 
 def kinds(slack):
     return [c[0] for c in slack.calls]
@@ -216,6 +220,47 @@ with tempfile.TemporaryDirectory() as tmp:
     jp.main(["--state", str(cli_state), "track", "case-4009", "C0C40SWBJN7", "ticket-case-4009"])
     check("track registers ticket (key upper-cased)", "CASE-4009" in json.loads(cli_state.read_text())["tickets"])
 
+    os.environ.pop("CTC_LOG_DIR", None)
+
+# ---- failing polls alert in Slack (an expired token once went unnoticed for days)
+with tempfile.TemporaryDirectory() as tmp:
+    os.environ["CTC_LOG_DIR"] = tmp
+    jira, slack = FakeJira(), FakeSlack()
+    state = jp.ChannelState(Path(tmp) / "state" / "channels.json")
+    poller = jp.Poller(jira, slack, state, ["CASE"], 2, ["Done"], ["U1"])
+    class Unauthorized(Exception):
+        pass
+    def fail_401(jql, fields):
+        raise Unauthorized("401 Client Error: Unauthorized for url: https://api.atlassian.com/...")
+    jira.search = fail_401
+    t0 = 1_000_000.0
+    posts = lambda: [c for c in slack.calls if c[0] == "post"]
+    poller.tick(now=t0); poller.tick(now=t0 + 300)
+    check("No alert in the first 10 minutes", posts() == [], posts())
+    poller.tick(now=t0 + 601)
+    check("Alert DM after 10 minutes of failures", len(posts()) == 1 and posts()[0][1] == "U1"
+          and "Jira sync is failing" in posts()[0][2], posts())
+    check("401 alert says how to renew the token", "update-jira-token.sh" in posts()[0][2] and "401" in posts()[0][2])
+    poller.tick(now=t0 + 900); poller.tick(now=t0 + 3600)
+    check("No repeat within 6 hours", len(posts()) == 1)
+    poller.tick(now=t0 + 601 + 6 * 3600)
+    check("Repeats after 6 hours of failure", len(posts()) == 2)
+    jira.search = lambda jql, fields: []
+    poller.tick(now=t0 + 7 * 3600)
+    check("Recovery is announced after an alert", len(posts()) == 3 and "recovered" in posts()[-1][2], posts()[-1])
+    poller.tick(now=t0 + 7 * 3600 + 60)
+    check("…once", len(posts()) == 3)
+    jira.search = fail_401
+    poller.tick(now=t0 + 8 * 3600)
+    jira.search = lambda jql, fields: []
+    poller.tick(now=t0 + 8 * 3600 + 120)
+    check("A short blip (no alert) recovers silently", len(posts()) == 3, posts())
+    slack.unreachable = {"U1"}
+    with state.locked():
+        state.meta["index_channel_id"] = "CIDX"
+    check("Falls back to #case-index when the DM fails, @-mentioning people", poller.alert("x") and posts()[-1][1] == "CIDX"
+          and posts()[-1][2].startswith("<@U1>"), posts()[-2:])
+    check("Generic errors point at the logs", "journalctl" in jp.failure_alert(RuntimeError("503 Service Unavailable"), t0))
     os.environ.pop("CTC_LOG_DIR", None)
 
 print(f"\n{passed} passed, {failed} failed")

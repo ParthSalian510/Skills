@@ -1072,8 +1072,11 @@ systemctl --user stop ctc-jira-poller                 # pause syncing
 **Renewing the Jira token.** The poller uses a scoped Atlassian API token
 (`read:jira-work`) through the `api.atlassian.com` gateway. Scoped tokens
 expire. When one does, every poll logs `401 Unauthorized` and nothing syncs.
-There is no alert yet (it's on the backlog), so check `journalctl` if Slack goes
-quiet. This happened between 29 Sep and 8 Oct 2026. To renew: create a token at
+This happened between 29 Sep and 8 Oct 2026. **Failure alerts:** after 10 minutes
+of failed polls the poller alerts the invite list. It repeats the alert every 6 hours,
+and says when sync recovers. A 401 alert includes the renewal command. Alerts
+go by DM if the Slack app's *Messages tab* is enabled (App Home settings).
+Otherwise they go to `#case-index` with an @-mention. To renew: create a token at
 id.atlassian.com → Security → API tokens → *Create API token with scopes*
 (Jira, `read:jira-work`, longest expiry). Then run this as yourself, never with `sudo`:
 

@@ -26,7 +26,8 @@ colleague names or ticket text here.
 
 ## Next improvements
 
-- Alert (Slack DM) when polling keeps failing, e.g. an expired Jira token; it failed silently on 8 Oct.
+- Optional: enable the Slack app's Messages tab (api.slack.com → App Home) so polling alerts arrive as DMs
+  instead of an @-mention in #case-index.
 - Weekly recurring-problems digest to #case-index, from the graph report.
 - Scrub sub-scope names that appear only in ticket text (not the customer field) from case pages.
 
