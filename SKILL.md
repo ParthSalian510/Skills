@@ -968,8 +968,17 @@ python3 scripts/jira_poller.py index-channel C0123ABCD                # use an e
 python3 scripts/case_index.py search "namenode oom"                   # best matches first
 python3 scripts/case_index.py show CASE-4009 | list
 python3 scripts/case_index.py related CASE-4009                       # past cases sharing components / keywords
+python3 scripts/case_index.py connect ACME "Beta Bank" --topic-b "dn query"  # shortest graph paths between two customers' cases
 python3 scripts/case_index.py export                                  # rebuild index/pages/ by hand
 ```
+
+**Connecting two customers** (`case_index.py connect A B`): customers aren't
+nodes in the graph, because names are kept off the pages. So `connect` uses the private
+index to map each side, whether a customer name or a single ticket key, to its case
+nodes. It then finds the shortest graph paths between them and prints the
+closest pairs with each case's problem and fix. `--topic-a` and `--topic-b`
+narrow a side (aliases: dn → datanode, co → core, query → queries/search,
+sww → "something went wrong"). It needs the Graphify graph (`graph.json`).
 
 **Similar past cases on new tickets** (`case_index.similar_on_new`): when
 the poller creates a channel for a new ticket, it shortlists past cases whose
@@ -1059,6 +1068,21 @@ journalctl --user -u ctc-jira-poller -f               # live logs
 systemctl --user restart ctc-jira-poller              # after config/code changes
 systemctl --user stop ctc-jira-poller                 # pause syncing
 ```
+
+**Renewing the Jira token.** The poller uses a scoped Atlassian API token
+(`read:jira-work`) through the `api.atlassian.com` gateway. Scoped tokens
+expire. When one does, every poll logs `401 Unauthorized` and nothing syncs.
+There is no alert yet (it's on the backlog), so check `journalctl` if Slack goes
+quiet. This happened between 29 Sep and 8 Oct 2026. To renew: create a token at
+id.atlassian.com → Security → API tokens → *Create API token with scopes*
+(Jira, `read:jira-work`, longest expiry). Then run this as yourself, never with `sudo`:
+
+```bash
+bash deploy/update-jira-token.sh   # hidden prompt; fixes a doubled paste, tests against Jira, restarts the poller
+```
+
+It prints three steps. Step 2 must say `HTTP 200`. After that, the first poll
+widens its lookback to cover the outage.
 
 Manual use (stop the service first so two pollers don't run at once):
 

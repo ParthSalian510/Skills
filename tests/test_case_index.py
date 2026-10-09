@@ -173,6 +173,44 @@ with tempfile.TemporaryDirectory() as tmp:
     check("CLI view shows request fields", "Work done:" in ci.format_entry(idx.get("SR-7"))
           and "Root cause" not in ci.format_entry(idx.get("SR-7")))
 
+# ---- connect: shortest graph paths between two customers' cases
+with tempfile.TemporaryDirectory() as tmp:
+    idx = ci.CaseIndex(Path(tmp) / "cases.jsonl")
+    idx.upsert(entry("CASE-1", customer="ACME", title="High memory on DN", components=["Datanode"], keywords=["high memory"]))
+    idx.upsert(entry("CASE-2", customer="ACME", title="Connector down", components=["Connector"]))
+    idx.upsert(entry("CASE-3", customer="Beta Bank", title="Slow queries on DN", components=["Datanode"], keywords=["slow query"]))
+    idx.upsert(entry("CASE-4", customer="Beta Bank", title="Reports not generating", components=["Reports"]))
+    idx.upsert(entry("CASE-5", customer="Gamma", title="Unrelated"))
+    graph = {"nodes": [{"id": "c1", "label": "CASE-1: High memory on DN"}, {"id": "c2", "label": "CASE-2 · Connector down"},
+                       {"id": "c3", "label": "CASE-3 Slow queries on DN"}, {"id": "c4", "label": "CASE-4: Reports"},
+                       {"id": "dn", "label": "Datanode"}, {"id": "core", "label": "Core server"},
+                       {"id": "c10", "label": "CASE-10 not this one"}],
+             "links": [{"source": "c1", "target": "dn", "relation": "references"},
+                       {"source": "dn", "target": "c3", "relation": "references"},
+                       {"source": "c2", "target": "core", "relation": "references"},
+                       {"source": "core", "target": "c4", "relation": "references"},
+                       {"source": "c10", "target": "c3", "relation": "semantically_similar_to"}]}
+    gpath = Path(tmp) / "graph.json"
+    gpath.write_text(json.dumps(graph))
+    r = ci.connect(idx, gpath, "acme", "beta")
+    check("connect finds both customers' cases", r["a"] == ["CASE-1", "CASE-2"] and r["b"] == ["CASE-3", "CASE-4"], r)
+    check("Shortest pair first, with the path through shared topics",
+          r["paths"][0]["a"] == "CASE-1" and r["paths"][0]["b"] == "CASE-3" and r["paths"][0]["hops"] == 2
+          and r["paths"][0]["nodes"] == ["CASE-1: High memory on DN", "Datanode", "CASE-3 Slow queries on DN"], r["paths"][0])
+    check("Every reachable pair listed, shortest first", [p["hops"] for p in r["paths"]] == sorted(p["hops"] for p in r["paths"])
+          and len(r["paths"]) == 2, r["paths"])
+    r = ci.connect(idx, gpath, "ACME", "Beta Bank", topic_b="dn query")
+    check("Topic narrows a side (dn matches Datanode, query matches queries)", r["b"] == ["CASE-3"], r["b"])
+    r = ci.connect(idx, gpath, "CASE-2", "beta")
+    check("A side can be a single ticket", r["a"] == ["CASE-2"] and r["paths"][0]["b"] == "CASE-4", r)
+    check("CASE-1 never matches CASE-10's node", ci._case_node(json.loads(gpath.read_text())["nodes"], "CASE-1") == "c1")
+    r = ci.connect(idx, gpath, "acme", "nobody")
+    check("Unknown customer → empty side, no paths", r["b"] == [] and r["paths"] == [], r)
+    out = subprocess.run([sys.executable, str(ROOT / "scripts" / "case_index.py"), "--index", str(idx.path), "connect", "acme",
+                          "beta", "--topic-b", "dn", "--graph", str(gpath)], capture_output=True, text=True)
+    check("CLI connect prints the path and both cases", out.returncode == 0 and "CASE-1 → CASE-3 · 2 hops" in out.stdout
+          and "Datanode" in out.stdout and "Fix:" in out.stdout, out.stdout + out.stderr)
+
 # ---- engine: closing a ticket
 class FakeSlack:
     def __init__(self):

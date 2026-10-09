@@ -269,6 +269,87 @@ def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
     return {"cases": kinds.count("case"), "requests": kinds.count("request"), "concepts": len(concept_cases)}
 
 
+# Short names the team uses for components, so a topic like "dn query" finds "Datanode … slow queries".
+TOPIC_ALIASES = {"dn": ["dn", "datanode", "data node"], "co": ["co", "core"], "ad": ["ad", "adapter"],
+                 "query": ["query", "queries", "search"], "sww": ["sww", "something went wrong"]}
+
+
+def _matches_topic(e: Dict[str, Any], topic: str) -> bool:
+    """Every word of the topic (or one of its aliases) appears in the case's text."""
+    if not topic:
+        return True
+    text = " ".join(str(e.get(k) or "") for k in ("title", "problem", "root_cause", "fix", "request", "work_done"))
+    text = (text + " " + " ".join(e.get("components") or []) + " " + " ".join(e.get("keywords") or [])).lower()
+    for word in topic.lower().split():
+        options = TOPIC_ALIASES.get(word, [word])
+        if not any(re.search(rf"\b{re.escape(o)}(e?s)?\b", text) for o in options):
+            return False
+    return True
+
+
+def _side(index: "CaseIndex", who: str, topic: str) -> List[str]:
+    """Ticket keys for one side: a single ticket key, or every case of a customer (name match, any case)."""
+    if re.fullmatch(r"[A-Za-z]+-\d+", who.strip()):
+        return [who.strip().upper()] if index.get(who.strip().upper()) else []
+    w = who.strip().lower()
+    return sorted(e["ticket_id"] for e in index.entries()
+                  if w and w in (e.get("customer") or "").lower() and _matches_topic(e, topic))
+
+
+def _case_node(nodes: List[Dict[str, Any]], key: str) -> Optional[str]:
+    """The graph node for a case page: its label starts with the key ("CASE-1: …"), never CASE-10's."""
+    rx = re.compile(rf"^{re.escape(key)}(?!\d)")
+    return next((n["id"] for n in nodes if rx.match(str(n.get("label") or ""))), None)
+
+
+def connect(index: "CaseIndex", graph_path: Path, side_a: str, side_b: str, topic_a: str = "", topic_b: str = "",
+            limit: int = 10) -> Dict[str, Any]:
+    """Shortest paths in the Graphify graph between two customers' cases (or single tickets), shortest first.
+
+    Customers are not nodes in the graph (names are kept off the pages), so the private index maps each
+    customer to its case nodes and the paths run between those. Plain breadth-first search, no dependencies.
+    """
+    graph = json.loads(Path(graph_path).read_text())
+    nodes = graph.get("nodes") or []
+    labels = {n["id"]: str(n.get("label") or n["id"]) for n in nodes}
+    adj: Dict[str, List[tuple]] = {}
+    for l in graph.get("links") or graph.get("edges") or []:
+        rel = l.get("relation") or "related"
+        adj.setdefault(l["source"], []).append((l["target"], rel))
+        adj.setdefault(l["target"], []).append((l["source"], rel))
+    a_keys, b_keys = _side(index, side_a, topic_a), _side(index, side_b, topic_b)
+    b_nodes = {}
+    for k in b_keys:
+        n = _case_node(nodes, k)
+        if n:
+            b_nodes[n] = k
+    paths = []
+    for a in a_keys:
+        start = _case_node(nodes, a)
+        if not start:
+            continue
+        prev = {start: None}
+        queue = [start]
+        for node in queue:  # BFS: queue grows as we go
+            for nxt, rel in adj.get(node, []):
+                if nxt not in prev:
+                    prev[nxt] = (node, rel)
+                    queue.append(nxt)
+        for bn, b in b_nodes.items():
+            if bn not in prev or b == a:
+                continue
+            chain, rels, cur = [bn], [], bn
+            while prev[cur]:
+                cur, rel = prev[cur]
+                chain.append(cur)
+                rels.append(rel)
+            chain.reverse()
+            rels.reverse()
+            paths.append({"a": a, "b": b, "hops": len(chain) - 1, "nodes": [labels[n] for n in chain], "relations": rels})
+    paths.sort(key=lambda p: (p["hops"], p["a"], p["b"]))
+    return {"a": a_keys, "b": b_keys, "paths": paths[:limit] if limit else paths}
+
+
 def format_entry(e: Dict[str, Any]) -> str:
     """Plain-text view for the CLI."""
     lines = [f"{e['ticket_id']} · {e.get('customer') or '?'} · {e.get('product_version') or 'no version'} · "
@@ -295,6 +376,13 @@ def main(argv=None) -> int:
     rl = sub.add_parser("related")
     rl.add_argument("ticket_id")
     rl.add_argument("--limit", type=int, default=5)
+    cn = sub.add_parser("connect", help="shortest graph paths between two customers' cases (or two tickets)")
+    cn.add_argument("side_a", help="customer name (or part of it) or a ticket key")
+    cn.add_argument("side_b", help="customer name (or part of it) or a ticket key")
+    cn.add_argument("--topic-a", default="", help="only side A cases about this, e.g. \"dn memory\"")
+    cn.add_argument("--topic-b", default="", help="only side B cases about this, e.g. \"dn query\"")
+    cn.add_argument("--limit", type=int, default=6)
+    cn.add_argument("--graph", default=str(DEFAULT_INDEX_PATH.parent / "pages" / "graphify-out" / "graph.json"))
     ex = sub.add_parser("export")
     ex.add_argument("--out", default=str(DEFAULT_INDEX_PATH.parent / "pages"))
     args = p.parse_args(argv)
@@ -306,6 +394,30 @@ def main(argv=None) -> int:
         e = index.get(args.ticket_id)
         print(format_entry(e) if e else f"{args.ticket_id.upper()} is not in the index.")
         return 0 if e else 1
+    elif args.cmd == "connect":
+        if not Path(args.graph).exists():
+            print(f"No graph at {args.graph}; build it with scripts/rebuild_graph.py.", file=sys.stderr)
+            return 1
+        r = connect(index, Path(args.graph), args.side_a, args.side_b, args.topic_a, args.topic_b, args.limit)
+        def side(name, keys, topic):
+            return f"{name}{' (' + topic + ')' if topic else ''}: {len(keys)} case{'s' if len(keys) != 1 else ''}"
+        print(f"{side(args.side_a, r['a'], args.topic_a)} · {side(args.side_b, r['b'], args.topic_b)} · "
+              f"{len(r['paths'])} closest connection{'s' if len(r['paths']) != 1 else ''} shown")
+        if not r["paths"]:
+            print("No connection found (check the names, or loosen --topic).")
+            return 0
+        best = r["paths"][0]["hops"]
+        for p in r["paths"]:
+            chain = p["nodes"][0] + "".join(f"\n     ── {rel} ──▶ {n}" for rel, n in zip(p["relations"], p["nodes"][1:]))
+            print(f"\n{p['a']} → {p['b']} · {p['hops']} hop{'s' if p['hops'] != 1 else ''}\n  {chain}")
+            if p["hops"] == best:  # the closest pairs: show what each case was and how it ended
+                for key in (p["a"], p["b"]):
+                    e = index.get(key) or {}
+                    first = sections(e)[0]
+                    clip = lambda t: (t or "-") if len(t or "") <= 220 else t[:220].rsplit(" ", 1)[0] + "…"
+                    print(f"  {key} · {e.get('customer') or '?'} · {e.get('product_version') or 'no version'}\n"
+                          f"    {first[1]}: {clip(e.get(first[0]))}\n"
+                          f"    {'Fix' if kind_of(e) == 'case' else 'Done'}: {clip(resolution_text(e))}")
     elif args.cmd == "related":
         hits = related(index, args.ticket_id, args.limit)
         if not index.get(args.ticket_id):

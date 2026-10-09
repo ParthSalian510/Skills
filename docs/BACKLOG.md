@@ -3,15 +3,26 @@
 Open work for the create-ticket-channel skill, newest first. This repo is public: no customer names,
 colleague names or ticket text here.
 
+## In progress
+
+- **SR backfill (9–10 Oct 2026).** A one-off systemd timer `ctc-sr-backfill` runs
+  `index/run_sr_backfill.sh` at 22:00 on 9 Oct: 315 SRs, index-only, up to 8 passes that wait out plan
+  limits. Next: check totals; scrub scope names from SR pages; rebuild the graph (CASE + SR); then
+  re-enable `ctc-graph-rebuild.timer`, which is paused until then.
+- **8 SRs with no Organization** failed channel creation on 9 Oct. They are now excluded
+  (stream/fields or test). If another case appears, decide: take the customer from `[...]` in the title, or skip.
+
 ## Waiting on a decision
 
-- **Always-on host.** Pick the host (Bloo VM recommended), how summaries reach Claude there (own
-  login with plan limits, or a Bloo API key), and whether tokens and case data may live on it.
+- **Always-on host.** Host chosen: an always-on office server. Still open: how summaries reach
+  Claude there (recommended: a Bloo API key, not a personal login with plan limits; measure a week of
+  usage first), who has admin access to the server, and IT approval for tokens and case data on it
+  (use a dedicated Linux user, a Jira service account, and back up `index/`).
   The move itself: install Python, the Claude CLI and Graphify; copy the env file, `state/` and
   `index/`; run both install scripts; stop the laptop poller first so nothing posts twice.
-- **SR history.** 466 closed SRs from the last 6 months: index all, some request types, or skip.
-- **Cancelled, Declined, Failed and Archived SRs.** Keep indexing them, or leave them out.
-- **Sharing the graph.** A shared host or ngrok exposes case data; needs approval. Single-user for now.
+- **Sharing the graph.** Agreed: first build a user-friendly case explorer (search, topic clusters,
+  case → problem/fix/similar cases), then make it available. Open: "public" meaning inside Bloo
+  (recommended) or the open internet (would expose customer issues).
 
 ## Next improvements
 
