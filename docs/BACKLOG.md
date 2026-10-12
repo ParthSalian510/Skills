@@ -5,10 +5,9 @@ colleague names or ticket text here.
 
 ## In progress
 
-- **SR backfill (9–10 Oct 2026).** A one-off systemd timer `ctc-sr-backfill` runs
-  `index/run_sr_backfill.sh` at 22:00 on 9 Oct: 315 SRs, index-only, up to 8 passes that wait out plan
-  limits. Next: check totals; scrub scope names from SR pages; rebuild the graph (CASE + SR); then
-  re-enable `ctc-graph-rebuild.timer`, which is paused until then.
+- **Graph platform.** Done: versioned, checked snapshots with atomic swap, a failure alert, and nightly
+  plus hourly (10+ changes) triggers. Next: the query server and viewer in a container (API key, health
+  check), nightly backups of `index/` and the Graphify cache, and an office-server deployment guide.
 - **8 SRs with no Organization** failed channel creation on 9 Oct. They are now excluded
   (stream/fields or test). If another case appears, decide: take the customer from `[...]` in the title, or skip.
 
@@ -29,7 +28,6 @@ colleague names or ticket text here.
 - Optional: enable the Slack app's Messages tab (api.slack.com → App Home) so polling alerts arrive as DMs
   instead of an @-mention in #case-index.
 - Weekly recurring-problems digest to #case-index, from the graph report.
-- Scrub sub-scope names that appear only in ticket text (not the customer field) from case pages.
 
 ## Bloo workspace
 
@@ -44,6 +42,10 @@ colleague names or ticket text here.
 - Parked: webhook server and ngrok route; U3 (member-invite failure in the chat skill).
 
 ## Done
+
+- 12 Oct 2026: pages scrubbed of scope names (local `index/scrub_names.txt`), IPs and domains. The graph is
+  rebuilt with CASE and SR as the first versioned snapshot, and the nightly rebuild is re-enabled.
+- 10 Oct 2026: SR backfill finished in one pass: 304 SRs indexed (91 stream/fields and 67 test SRs excluded).
 
 - 8 Oct 2026: Figma board updated with the 29 Sep changes (7 text edits across Views 01–04, none
   skipped). A one-time cloud routine applied them after the Figma MCP Starter-plan limit stopped

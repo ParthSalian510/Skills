@@ -54,6 +54,13 @@ SEARCH_FIELDS = {"title": 3, "problem": 3, "root_cause": 3, "fix": 2, "component
                  "customer": 2, "product_version": 1, "ticket_id": 5}
 
 
+def default_graph_path() -> Path:
+    """The published snapshot (index/graphs/current) if there is one, else the last raw Graphify build."""
+    base = default_index_path().parent
+    current = base / "graphs" / "current" / "graph.json"
+    return current if current.exists() else base / "pages" / "graphify-out" / "graph.json"
+
+
 def default_index_path() -> Path:
     return Path(os.environ.get("CTC_INDEX_PATH") or DEFAULT_INDEX_PATH)
 
@@ -193,6 +200,30 @@ def _page_name(text: str) -> str:
     return re.sub(r"[\\/:*?\"<>|#^\[\]]+", " ", text).strip()[:80] or "unnamed"
 
 
+# Hosts are kept off the pages: every IPv4 address and domain name becomes a placeholder. A customer's own
+# subdomain of a vendor (e.g. <customer>.okta.com) can't be told apart from a generic one, and the graph's
+# structure comes from components and keywords, not host names.
+_IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?\b")
+_FQDN = re.compile(r"\b[a-z0-9][\w-]*(?:\.[\w-]+)*\.(?:com|net|org|in|io|local|lan|corp|internal|co|cloud|ai|eu|uk)\b",
+                   re.IGNORECASE)
+
+
+def _without_hosts(text: str) -> str:
+    """IPv4 addresses → "an IP address"; domain names → "a host"."""
+    if not text:
+        return text
+    return _FQDN.sub("a host", _IPV4.sub("an IP address", text))
+
+
+def scrub_names(index_path: Path) -> List[str]:
+    """Extra names to keep off the pages (customer scopes, group companies) from index/scrub_names.txt,
+    a local file next to the index, so the public repo never holds them."""
+    f = Path(index_path).parent / "scrub_names.txt"
+    if not f.exists():
+        return []
+    return [l.strip() for l in f.read_text().splitlines() if l.strip() and not l.lstrip().startswith("#")]
+
+
 def _without_customers(text: str, own: str, customers: List[str]) -> str:
     """Drop customer names from page text. A leading "ACME || " goes; elsewhere the case's own customer
     becomes "the customer" and any other known customer "another customer"."""
@@ -223,21 +254,22 @@ def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
     for e in index.entries():
         for key in concepts_of(e):
             seen[key] = seen.get(key, 0) + 1
-    customers = sorted({(e.get("customer") or "").strip() for e in index.entries()} - {""}, key=len, reverse=True)
+    customers = sorted(({(e.get("customer") or "").strip() for e in index.entries()} | set(scrub_names(index.path))) - {""},
+                       key=len, reverse=True)
     named = re.compile("|".join(rf"(?<!\w){re.escape(c)}(?!\w)" for c in customers), re.I) if customers else None
     for e in index.entries():
         # No customer on the pages: even as plain text, Graphify's semantic pass made each customer a hub
         # (one linked 28 cases), so topics grouped by customer instead of by kind of problem. The name stays
         # in index/cases.jsonl, search and #case-index; only the graph input leaves it out.
         cust = (e.get("customer") or "").strip()
-        text = {k: _without_customers(e.get(k) or "", cust, customers)
+        text = {k: _without_customers(_without_hosts(e.get(k) or ""), cust, customers)
                 for k in ["title"] + [f for f, _ in sections(e)]}
         links = [f"version {e['product_version']}"] if e.get("product_version") else []
         comp_links = []
         for key, display in concepts_of(e).items():
             # only concepts shared by several cases get a page, and never one named after a customer
             if seen[key] < 2 or (named and named.search(key)):
-                comp_links.append(_without_customers(display, cust, customers))
+                comp_links.append(_without_customers(_without_hosts(display), cust, customers))
                 continue
             page = _page_name(key)
             concept_cases.setdefault(page, []).append(e["ticket_id"])
@@ -382,7 +414,7 @@ def main(argv=None) -> int:
     cn.add_argument("--topic-a", default="", help="only side A cases about this, e.g. \"dn memory\"")
     cn.add_argument("--topic-b", default="", help="only side B cases about this, e.g. \"dn query\"")
     cn.add_argument("--limit", type=int, default=6)
-    cn.add_argument("--graph", default=str(DEFAULT_INDEX_PATH.parent / "pages" / "graphify-out" / "graph.json"))
+    cn.add_argument("--graph", default=str(default_graph_path()))
     ex = sub.add_parser("export")
     ex.add_argument("--out", default=str(DEFAULT_INDEX_PATH.parent / "pages"))
     args = p.parse_args(argv)

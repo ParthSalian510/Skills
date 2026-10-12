@@ -1,4 +1,5 @@
-# Nightly rebuild of the case knowledge graph (Graphify). Triggered by ctc-graph-rebuild.timer.
+# Nightly rebuild of the case knowledge graph (Graphify) as a checked, versioned snapshot.
+# Triggered by ctc-graph-rebuild.timer; the Slack env is for the failure alert.
 # Logs: journalctl --user -u ctc-graph-rebuild · logs/graph.jsonl
 [Unit]
 Description=create-ticket-channel case graph rebuild (Graphify)
@@ -6,6 +7,7 @@ Description=create-ticket-channel case graph rebuild (Graphify)
 [Service]
 Type=oneshot
 WorkingDirectory=%h/.claude/skills/create-ticket-channel
+EnvironmentFile=-%h/.config/create-ticket-channel/env
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/python3 scripts/rebuild_graph.py

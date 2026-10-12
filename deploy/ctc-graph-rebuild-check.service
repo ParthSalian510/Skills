@@ -1,0 +1,12 @@
+# Hourly check: rebuild the case graph early once 10+ cases changed since the last snapshot
+# (the nightly ctc-graph-rebuild catches any smaller change). Triggered by ctc-graph-rebuild-check.timer.
+[Unit]
+Description=create-ticket-channel case graph rebuild when 10+ cases changed
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.claude/skills/create-ticket-channel
+EnvironmentFile=-%h/.config/create-ticket-channel/env
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 scripts/rebuild_graph.py --if-changed 10

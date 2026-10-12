@@ -27,7 +27,7 @@ What each file is for, and whether it runs for real:
 | `scripts/sync_engine.py` | Shared create/sync/archive/backfill logic and `state/channels.json` | Yes, test workspace |
 | `scripts/summarizer.py` | Comment → summary via `claude -p` (no names, scrubbed, tools off) | Yes, CASE-3997 and SR-4159 |
 | `scripts/case_index.py` | Index of closed cases (`index/cases.jsonl`, gitignored), search / related / similar, page export | Yes |
-| `scripts/rebuild_graph.py` | Nightly Graphify rebuild of `index/pages/` (timer `ctc-graph-rebuild`) | Yes |
+| `scripts/rebuild_graph.py` | Versioned, checked Graphify rebuilds into `index/graphs/` (timers `ctc-graph-rebuild`, `ctc-graph-rebuild-check`) | Yes |
 | `scripts/webhook_server.py` | Slack client, starter formatter, Jira-webhook receiver (queue + worker) | Client/formatter yes; webhook receiver built and tested but not connected (no Jira-side webhook) |
 | `scripts/ticket_sync.py` | Topic/emoji formatting (used by the sync engine); `TicketSyncManager` only *plans* actions | Formatting yes; manager no |
 | `scripts/audit_logger.py` | Writes one run record per run | Yes |
@@ -992,11 +992,31 @@ cases* note with each case's fix.
 
 **Case knowledge graph (Graphify).** `scripts/rebuild_graph.py` exports the
 pages, then runs `graphify extract` and `graphify cluster-only` through the
-Claude CLI backend. The output is `index/pages/graphify-out/`: `graph.json`,
-`GRAPH_REPORT.md` and an interactive `graph.html`.
-- A nightly timer, `ctc-graph-rebuild.timer` (02:30), rebuilds it only if
-  the index changed. Install it with `deploy/install-graph-rebuild.sh`. Use
-  `--force` for a full re-extract, and check `logs/graph.jsonl` for runs.
+Claude CLI backend. Every build becomes a checked, **versioned snapshot**.
+- **Snapshots.** Each build goes to `index/graphs/<UTC time>/`. A snapshot
+  holds `graph.json`, `graph.html`, `GRAPH_REPORT.md`, a copy of the index it
+  was built from, and `manifest.json` (counts, coverage, a fingerprint per
+  case). `index/graphs/current` is a relative symlink, swapped atomically.
+  Readers use `index/graphs/current/graph.json`: the `case-graph` MCP server
+  and `case_index.py connect`. Graphify's server reloads on the swap.
+  The newest 7 snapshots are kept; to roll back, point `current` at an older one.
+- **Checks before publishing.** The graph must not be empty, must not lose
+  more than 10% of its nodes (`--allow-shrink` overrides), and must contain at
+  least 90% of indexed tickets. A failed build or failed check changes
+  nothing. The last good snapshot keeps serving and a Slack alert goes out
+  (DM, or #case-index with @-mentions).
+- **When it rebuilds.** Changes are counted per case by fingerprint, so a
+  re-indexed but unchanged case doesn't count.
+  - `ctc-graph-rebuild.timer`, nightly at 02:30, rebuilds on any change.
+  - `ctc-graph-rebuild-check.timer`, hourly at :15, rebuilds early once 10+ cases changed (`--if-changed 10`).
+  - On demand: run `python3 scripts/rebuild_graph.py` (`--force` re-extracts every page).
+
+  A lock file allows one build at a time. Install both timers with
+  `deploy/install-graph-rebuild.sh`, and check `logs/graph.jsonl` for runs.
+- **Pages carry no identifying names.** Customer names from the index and the extra
+  names in the local, gitignored `index/scrub_names.txt` (customer scopes,
+  group companies) are replaced. So are IPv4 addresses ("an IP address")
+  and domain names ("a host").
 - The graph is also the MCP server `case-graph` (user scope), so any Claude
   Code session can query past cases with `query_graph`, `get_node`,
   `get_neighbors` and `shortest_path`.

@@ -1,0 +1,11 @@
+# Every hour at :15 (the build lock stops it overlapping the nightly rebuild).
+[Unit]
+Description=Hourly case graph change check
+
+[Timer]
+OnCalendar=*-*-* *:15:00
+Persistent=false
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

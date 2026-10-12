@@ -173,6 +173,21 @@ with tempfile.TemporaryDirectory() as tmp:
     check("CLI view shows request fields", "Work done:" in ci.format_entry(idx.get("SR-7"))
           and "Root cause" not in ci.format_entry(idx.get("SR-7")))
 
+# ---- extra names, IPs and domains stay off the pages
+with tempfile.TemporaryDirectory() as tmp:
+    idx = ci.CaseIndex(Path(tmp) / "cases.jsonl")
+    (Path(tmp) / "scrub_names.txt").write_text("# comment\nAcme Scope\nZed\n")
+    idx.upsert({**entry("CASE-1", title="Zed | DN down", customer="Beta", components=["Datanode"]),
+                "problem": "Logs from 10.33.1.135 and sso.zed.example.com stopped for the Acme Scope scope; Zed users saw errors",
+                "fix": "Restarted the collector at api.vendor.com"})
+    check("Extra names read from the local file, comments skipped", ci.scrub_names(idx.path) == ["Acme Scope", "Zed"])
+    ci.export_pages(idx, Path(tmp) / "pages")
+    page = (Path(tmp) / "pages" / "cases" / "CASE-1.md").read_text()
+    check("Extra names, IPs and domains replaced on the page",
+          "Zed" not in page and "Acme Scope" not in page and "10.33.1.135" not in page and ".com" not in page
+          and "an IP address" in page and "a host" in page and "# CASE-1 · DN down" in page, page)
+    check("Hosts helper", ci._without_hosts("see 192.168.1.4/24 and portal.x.co.in") == "see an IP address and a host")
+
 # ---- connect: shortest graph paths between two customers' cases
 with tempfile.TemporaryDirectory() as tmp:
     idx = ci.CaseIndex(Path(tmp) / "cases.jsonl")
