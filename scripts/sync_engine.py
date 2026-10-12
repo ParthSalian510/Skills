@@ -146,17 +146,19 @@ class SyncEngine:
         left out on purpose: a ticket channel may one day be shared with that customer.
         """
         from case_index import similar
-        candidates = similar(self.case_index, f"{ticket.get('summary')}\n{ticket.get('description')}",
-                             exclude=ticket.get("ticket_id") or "")
-        if not candidates:
-            return "none"
-        picks = self.summarizer.pick_related(ticket, candidates)
-        if picks is None:
+        from change_links import recent_changes
+        text = f"{ticket.get('summary')}\n{ticket.get('description')}"
+        candidates = similar(self.case_index, text, exclude=ticket.get("ticket_id") or "")
+        # this customer's own recently closed changes (SRs): the usual first question is "what changed?"
+        changes = recent_changes(self.case_index, ticket.get("customer") or "", text)
+        picks = self.summarizer.pick_related(ticket, candidates) if candidates else []
+        if picks is None and not changes:
             return "failed"
-        if not picks:
+        picks = picks or []
+        if not picks and not changes:
             return "none"
         by_id = {c["ticket_id"]: c for c in candidates}
-        lines = ["*Possibly related past cases* · picked from #case-index, check before relying on them"]
+        lines = ["*Possibly related past cases* · picked from #case-index, check before relying on them"] if picks else []
         for p in picks:
             c = by_id[p["ticket_id"]]
             ref = f"<{c['jira_url']}|{c['ticket_id']}>" if c.get("jira_url") else c["ticket_id"]
@@ -164,6 +166,15 @@ class SyncEngine:
             fix = fix if len(fix) <= 220 else fix[:220].rsplit(" ", 1)[0] + "…"
             lines.append(f"• {ref} · closed {(c.get('closed') or '?')[:10]} — {_slack_escape(p['why'] or c.get('title') or '')}\n"
                          f"   _{'Done' if kind_of(c) == 'request' else 'Fix'}:_ {_slack_escape(fix)}")
+        if changes:
+            lines.append(("\n" if lines else "") + "*Recent changes for this customer* · closed service requests "
+                         "from the last 30 days, in case one of them is the trigger")
+            for c in changes:
+                ref = f"<{c['jira_url']}|{c['ticket_id']}>" if c.get("jira_url") else c["ticket_id"]
+                done = (c.get("work_done") or c.get("title") or "").strip()
+                done = done if len(done) <= 160 else done[:160].rsplit(" ", 1)[0] + "…"
+                ago = "today" if c["days_ago"] == 0 else f"{c['days_ago']} day{'s' if c['days_ago'] != 1 else ''} ago"
+                lines.append(f"• {ref} · {c['category'].split(' (')[0]} · closed {ago} — {_slack_escape(done)}")
         return "posted" if self.messenger.post_message(channel_id, "\n".join(lines)) else "failed"
 
     def indexing_for(self, key: str) -> bool:

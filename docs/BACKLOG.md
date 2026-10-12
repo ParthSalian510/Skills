@@ -27,7 +27,7 @@ colleague names or ticket text here.
 
 - Optional: enable the Slack app's Messages tab (api.slack.com → App Home) so polling alerts arrive as DMs
   instead of an @-mention in #case-index.
-- Weekly recurring-problems digest to #case-index, from the graph report.
+- Weekly recurring-problems digest (could include the week's likely change → incident links) to #case-index, from the graph report.
 
 ## Bloo workspace
 
@@ -43,6 +43,8 @@ colleague names or ticket text here.
 
 ## Done
 
+- 13 Oct 2026: change → incident links. SR changes are matched to the same customer's later CASEs and
+  judged by Claude; links reach the graph pages, and new-ticket notes list the customer's recent changes.
 - 12 Oct 2026: pages scrubbed of scope names (local `index/scrub_names.txt`), IPs and domains. The graph is
   rebuilt with CASE and SR as the first versioned snapshot, and the nightly rebuild is re-enabled.
 - 10 Oct 2026: SR backfill finished in one pass: 304 SRs indexed (91 stream/fields and 67 test SRs excluded).

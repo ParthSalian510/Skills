@@ -32,6 +32,7 @@ with tempfile.TemporaryDirectory() as tmp:
     os.environ["CTC_LOG_DIR"] = tmp
     import rebuild_graph as rg
     from case_index import CaseIndex
+    rg.default_judge = lambda: None  # never the real Claude; tests that need links pass judge=
 
     calls, alerts = [], []
     notify = lambda text: alerts.append(text) or True
@@ -125,6 +126,31 @@ with tempfile.TemporaryDirectory() as tmp:
         idx.upsert({**e, "fix": "while locked"})
         calls.clear()
         check("A second build while one runs is skipped", rg.main([], runner=fake(), notify=notify) == 0 and calls == [])
+
+    # change → incident links: judged before the change check, and a new link alone triggers a rebuild
+    CaseIndex().upsert({"ticket_id": "SR-9", "kind": "request", "title": "Apply extractor", "customer": "ACME",
+                        "opened": "2026-09-01", "closed": "2026-09-02", "category": "extractor or parser (incl. parsing issues)",
+                        "outcome": "completed", "request": "r", "components": [], "keywords": []})
+    CaseIndex().upsert({"ticket_id": "CASE-9", "title": "Logs unparsed", "customer": "ACME", "opened": "2026-09-05",
+                        "problem": "parsing broke", "components": [], "keywords": []})
+    asked = []
+    verdict = {"v": "unrelated"}
+    def judge(sr, cases):
+        asked.append(sr["ticket_id"])
+        return {c["ticket_id"]: {"verdict": verdict["v"], "why": "parsing broke after it"} for c in cases}
+    check("Rebuild asks Claude about the new pair first", rg.main([], runner=fake(), notify=notify, judge=judge) == 0
+          and asked == ["SR-9"], asked)
+    check("Links file copied into the snapshot", (current / "change_links.json").exists())
+    calls.clear()
+    check("--no-links skips the judge", rg.main(["--no-links"], runner=fake(), notify=notify, judge=judge) == 0
+          and asked == ["SR-9"] and calls == [])
+    (Path(tmp) / "index" / "change_links.json").unlink()
+    verdict["v"] = "likely"
+    before = os.readlink(current)
+    check("A new likely link alone (no ticket changed) triggers a rebuild",
+          rg.main([], runner=fake(), notify=notify, judge=judge) == 0 and os.readlink(current) != before
+          and json.loads((current / "manifest.json").read_text())["changed"] == 2)
+    check("…and the pages carry it", "[[CASE-9]]" in (Path(tmp) / "index" / "pages" / "requests" / "SR-9.md").read_text())
 
     logs = [json.loads(l) for l in (Path(tmp) / "graph.jsonl").read_text().splitlines()] \
         if (Path(tmp) / "graph.jsonl").exists() else \

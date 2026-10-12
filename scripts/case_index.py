@@ -10,6 +10,8 @@ replaces its entry, so the file has at most one line per ticket.
     python3 scripts/case_index.py list
     python3 scripts/case_index.py related CASE-4009     # past cases sharing components / keywords
     python3 scripts/case_index.py export                # Markdown pages with [[wikilinks]] → index/pages/
+
+Change → incident links (which SR changes may have triggered later cases) live in scripts/change_links.py.
 """
 import argparse
 import fcntl
@@ -256,6 +258,8 @@ def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
             seen[key] = seen.get(key, 0) + 1
     customers = sorted(({(e.get("customer") or "").strip() for e in index.entries()} | set(scrub_names(index.path))) - {""},
                        key=len, reverse=True)
+    from change_links import by_ticket  # imported here: change_links imports this module
+    change_links = by_ticket(index)
     named = re.compile("|".join(rf"(?<!\w){re.escape(c)}(?!\w)" for c in customers), re.I) if customers else None
     for e in index.entries():
         # No customer on the pages: even as plain text, Graphify's semantic pass made each customer a hub
@@ -290,6 +294,13 @@ def export_pages(index: "CaseIndex", out_dir: Path) -> Dict[str, int]:
                 continue
             body += [f"**{label}:** {text.get(field) or '-'}", ""]
         body.append("**Involves:** " + (", ".join(comp_links) or "-"))
+        for label, mine, other in (("Followed by", "change", "incident"), ("Possibly caused by", "incident", "change")):
+            # change → incident links judged by Claude (scripts/change_links.py), written as explicit wikilinks
+            found = [l for l in change_links.get(e["ticket_id"], []) if l[mine] == e["ticket_id"]]
+            if found:
+                body += ["", f"**{label}:** " + "; ".join(
+                    f"[[{l[other]}]] ({l['verdict']}: {_without_customers(_without_hosts(l['why']), cust, customers)})"
+                    for l in found)]
         if e.get("jira_url"):
             body += ["", f"[Open in Jira]({e['jira_url']})"]
         folder = "requests" if kind == "request" else "cases"

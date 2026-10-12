@@ -124,6 +124,22 @@ Past cases:
 {cases}
 </ticket>"""
 
+CHANGE_PROMPT = """Below is a change carried out for a customer (a closed service request), followed by support cases the same customer opened while it ran or soon after. For each case, judge whether this change plausibly caused or triggered it:
+- "likely": the case's problem or root cause points at this change (for example parsing broke after this extractor was applied, a service failed after this upgrade, patch or reboot), and the timing fits.
+- "possible": the same component or area, shortly after the change, but the case doesn't establish what caused it.
+- "unrelated": a different area, a cause that has nothing to do with the change, or only a shared product or server name.
+Be strict: most cases are unrelated. Judge every case listed.
+
+Reply with only a JSON list, no code fence: [{{"ticket_id": "...", "verdict": "likely|possible|unrelated", "why": "one short clause, no customer or people names"}}]
+
+<ticket>
+Change:
+{change}
+
+Cases:
+{cases}
+</ticket>"""
+
 UPDATE_PROMPT = """New public comments were added to this ticket. Write one to three "• " bullets saying what they add: new findings, actions taken, decisions, or what is needed next. If they add nothing of substance (only scheduling, pleasantries, "any update?"), reply with exactly {no_update}.
 
 <ticket>
@@ -251,6 +267,30 @@ class ClaudeCLISummarizer:
             if isinstance(p, dict) and p.get("ticket_id") in allowed and p["ticket_id"] not in {o["ticket_id"] for o in out}:
                 out.append({"ticket_id": p["ticket_id"], "why": scrub(str(p.get("why") or ""))[:160]})
         return out[:3]
+
+    def judge_changes(self, change: Dict[str, Any], cases: List[Dict[str, Any]]) -> Optional[Dict[str, Dict[str, str]]]:
+        """{case ticket_id: {verdict, why}} for one change (an indexed SR) and the cases that followed it;
+        None if the call or the reply failed. Cases left out of the reply are missing from the result."""
+        from case_index import sections
+
+        def show(e, when):
+            return (f"{e['ticket_id']} ({when} {(e.get(when) or '?')[:10]}): {scrub(e.get('title') or '')}\n"
+                    + "\n".join(f"  {label}: {scrub(str(e.get(field) or '-'))}" for field, label in sections(e)))
+        raw = self._ask(CHANGE_PROMPT.format(change=show(change, "closed"),
+                                             cases="\n\n".join(show(c, "opened") for c in cases)))
+        if raw is None:
+            return None
+        start, end = raw.find("["), raw.rfind("]")
+        try:
+            items = json.loads(raw[start:end + 1]) if start >= 0 and end > start else None
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(items, list):
+            return None
+        allowed = {c["ticket_id"] for c in cases}
+        return {i["ticket_id"]: {"verdict": str(i.get("verdict") or "").strip().lower(),
+                                 "why": scrub(str(i.get("why") or ""))}
+                for i in items if isinstance(i, dict) and i.get("ticket_id") in allowed}
 
     def update(self, ticket: Dict[str, Any], new: List[Dict[str, Any]], earlier: List[Dict[str, Any]],
                text_of: Callable[[Any], str]) -> Optional[str]:

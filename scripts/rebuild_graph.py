@@ -5,8 +5,9 @@
     python3 scripts/rebuild_graph.py --if-changed 10    # hourly: rebuild only once 10+ cases changed
     python3 scripts/rebuild_graph.py --force            # full re-extraction (after changing the page format)
 
-Steps: export the Markdown pages from index/cases.jsonl → `graphify extract` (semantic pass through the Claude
-Code CLI under this machine's login, no API key) → `graphify cluster-only` → check the result → copy it into
+Steps: link changes to incidents (scripts/change_links.py; Claude judges only pairs it hasn't seen) → export
+the Markdown pages from index/cases.jsonl → `graphify extract` (semantic pass through the Claude Code CLI under
+this machine's login, no API key) → `graphify cluster-only` → check the result → copy it into
 index/graphs/<UTC time>/ with its own copy of the index and a manifest → atomically point index/graphs/current
 at it → keep the newest snapshots. Readers (the case-graph MCP server, `case_index.py connect`) use
 index/graphs/current/graph.json; Graphify's server notices the swap and reloads by itself.
@@ -32,6 +33,7 @@ from typing import Any, Callable, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audit_logger import AuditLogger  # noqa: E402
 from case_index import CaseIndex, export_pages  # noqa: E402
+from change_links import by_ticket, default_judge, link  # noqa: E402
 
 KEEP_SNAPSHOTS = 7
 MAX_SHRINK = 0.10       # a graph that loses more than 10% of its nodes is suspect
@@ -43,11 +45,15 @@ def graphify_bin() -> str:
     return os.environ.get("GRAPHIFY_BIN") or shutil.which("graphify") or str(Path.home() / ".local" / "bin" / "graphify")
 
 
-def fingerprints(index: CaseIndex) -> Dict[str, str]:
-    """ticket → hash of its entry (minus bookkeeping), so a re-indexed but unchanged case doesn't count."""
+def fingerprints(index: CaseIndex, links: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, str]:
+    """ticket → hash of its entry (minus bookkeeping) and its change links, so a re-indexed but unchanged
+    case doesn't count, and a new link counts for both of its tickets."""
     out = {}
+    links = links or {}
     for e in index.entries():
         body = {k: v for k, v in e.items() if k not in ("indexed_at",)}
+        if links.get(e["ticket_id"]):
+            body["_links"] = sorted(f"{l['change']}>{l['incident']}:{l['verdict']}:{l['why']}" for l in links[e["ticket_id"]])
         out[e["ticket_id"]] = hashlib.sha1(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
     return out
 
@@ -98,6 +104,8 @@ def publish(graphs: Path, out_dir: Path, index: CaseIndex, manifest: Dict[str, A
         if (out_dir / name).exists():
             shutil.copy2(out_dir / name, snap / name)
     shutil.copy2(index.path, snap / "cases.jsonl")  # the index this graph was built from, for consistent lookups
+    if (index.path.parent / "change_links.json").exists():
+        shutil.copy2(index.path.parent / "change_links.json", snap / "change_links.json")
     (snap / "manifest.json").write_text(json.dumps({**manifest, "snapshot": stamp}, indent=2))
     tmp = graphs / ".current.tmp"
     if tmp.is_symlink() or tmp.exists():
@@ -139,13 +147,17 @@ def fail(run: AuditLogger, step: int, name: str, seconds: float, message: str, n
     return 1
 
 
-def main(argv=None, runner=subprocess.run, notify: Callable[[str], bool] = slack_notify) -> int:
+def main(argv=None, runner=subprocess.run, notify: Callable[[str], bool] = slack_notify,
+         judge: Optional[Callable] = None) -> int:
     p = argparse.ArgumentParser(description="Rebuild the Graphify case graph as a checked, versioned snapshot.")
     p.add_argument("--force", action="store_true", help="rebuild even if nothing changed; re-extract every page")
     p.add_argument("--if-changed", type=int, default=1, metavar="N",
                    help="only rebuild once at least N cases changed since the last snapshot (default 1)")
     p.add_argument("--keep", type=int, default=KEEP_SNAPSHOTS, help=f"snapshots to keep (default {KEEP_SNAPSHOTS})")
     p.add_argument("--allow-shrink", action="store_true", help="publish even if the graph lost >10%% of its nodes")
+    p.add_argument("--no-links", action="store_true", help="don't ask Claude about new change → incident pairs")
+    p.add_argument("--max-link-calls", type=int, default=40, metavar="N",
+                   help="at most N Claude calls for change → incident links per run (default 40)")
     args = p.parse_args(argv)
 
     index = CaseIndex()
@@ -168,7 +180,16 @@ def main(argv=None, runner=subprocess.run, notify: Callable[[str], bool] = slack
             return 0
 
         previous = read_manifest(graphs)
-        prints = fingerprints(index)
+        judge = None if args.no_links else (judge or default_judge())
+        if judge:
+            t = time.time()
+            r = link(index, judge, max_calls=args.max_link_calls)
+            # a failed call only delays those links to the next run; it never blocks the graph
+            run.record_step(0, "Link changes to incidents", "failure" if r["failed"] else "success",
+                            time.time() - t, details=r)
+            if r["calls"]:
+                print(f"Change links: {r['calls']} Claude calls, {r['judged']} pairs judged, {r['pending']} pending.")
+        prints = fingerprints(index, by_ticket(index))
         changed = changed_since(prints, (previous or {}).get("fingerprints", {}))
         removed = sorted(set((previous or {}).get("fingerprints", {})) - set(prints))
         threshold = max(1, args.if_changed)

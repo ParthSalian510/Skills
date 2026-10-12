@@ -27,6 +27,7 @@ What each file is for, and whether it runs for real:
 | `scripts/sync_engine.py` | Shared create/sync/archive/backfill logic and `state/channels.json` | Yes, test workspace |
 | `scripts/summarizer.py` | Comment → summary via `claude -p` (no names, scrubbed, tools off) | Yes, CASE-3997 and SR-4159 |
 | `scripts/case_index.py` | Index of closed cases (`index/cases.jsonl`, gitignored), search / related / similar, page export | Yes |
+| `scripts/change_links.py` | Change → incident links: SR changes that may have triggered later CASEs (`index/change_links.json`, gitignored) | Yes |
 | `scripts/rebuild_graph.py` | Versioned, checked Graphify rebuilds into `index/graphs/` (timers `ctc-graph-rebuild`, `ctc-graph-rebuild-check`) | Yes |
 | `scripts/webhook_server.py` | Slack client, starter formatter, Jira-webhook receiver (queue + worker) | Client/formatter yes; webhook receiver built and tested but not connected (no Jira-side webhook) |
 | `scripts/ticket_sync.py` | Topic/emoji formatting (used by the sync engine); `TicketSyncManager` only *plans* actions | Formatting yes; manager no |
@@ -970,6 +971,8 @@ python3 scripts/case_index.py show CASE-4009 | list
 python3 scripts/case_index.py related CASE-4009                       # past cases sharing components / keywords
 python3 scripts/case_index.py connect ACME "Beta Bank" --topic-b "dn query"  # shortest graph paths between two customers' cases
 python3 scripts/case_index.py export                                  # rebuild index/pages/ by hand
+python3 scripts/change_links.py show [CASE-3830]                      # changes that may have caused incidents
+python3 scripts/change_links.py candidates | link [--max-calls N]     # the shortlist / ask Claude about new pairs
 ```
 
 **Connecting two customers** (`case_index.py connect A B`): customers aren't
@@ -989,6 +992,30 @@ cases* note with each case's fix.
 - If nothing matches well, nothing is posted.
 - Other customers' names are never included, because a channel may be
   shared with its customer.
+- The note also lists *Recent changes for this customer*: up to 3 of the
+  customer's own change SRs closed in the last 30 days, those sharing words
+  with the new ticket first. This is deterministic (no Claude call), and it
+  is posted even when no past case matched.
+
+**Change → incident links** (`scripts/change_links.py`): which closed SRs
+(changes) may have triggered later CASEs.
+- **Changes** are SRs of a changing kind (upgrade, patching or maintenance,
+  new log source, extractor or parser, configuration, storage) whose outcome
+  is completed or partially completed.
+- **Shortlist** (no Claude): the same customer's CASEs opened while the SR
+  ran or within 30 days after it closed, that share a specific component or
+  keyword, or whose problem names that kind of change ("after the upgrade",
+  "unparsed logs"). Concepts on more than 10% of tickets ("dnif", "pico")
+  don't count. At most 6 cases per change.
+- **Claude judges** each change with its shortlist in one call: likely,
+  possible or unrelated, with a short reason. Verdicts are cached in
+  `index/change_links.json` with a fingerprint of both tickets, so only new
+  or changed pairs cost a call. The graph rebuild runs this first (at most
+  40 calls a run; `--no-links` skips it), and a new link counts as a change
+  for both tickets.
+- **Where they show:** likely and possible links become explicit wikilinks on
+  the graph pages (**Followed by** on the SR, **Possibly caused by** on the
+  CASE), scrubbed like the rest of the page, and `change_links.py show`.
 
 **Case knowledge graph (Graphify).** `scripts/rebuild_graph.py` exports the
 pages, then runs `graphify extract` and `graphify cluster-only` through the
